@@ -1,0 +1,106 @@
+// Minimal VSG proof-of-concept viewer.
+//
+// Loads any file vsgXchange can read. If vsgXchange was built with
+// -DvsgXchange_OSG=ON (and osg2vsg + OSG are installed), that includes
+// .ive directly -- no pre-conversion needed for a quick smoke test.
+//
+// Usage:
+//   ive_poc terrain.vsgb
+//   ive_poc terrain.ive          (only works with OSG-enabled vsgXchange)
+
+#include <vsg/all.h>
+#include <vsgXchange/all.h>
+
+#include <iostream>
+
+int main(int argc, char** argv)
+{
+    vsg::CommandLine arguments(&argc, argv);
+
+    if (argc < 2)
+    {
+        std::cerr << "usage: " << argv[0] << " <scene file (.vsgb/.vsgt/.ive/...)>\n";
+        return 1;
+    }
+
+    // Options carry the loader set. IMPORTANT: because these options are
+    // passed when reading the root node, PagedLOD tiles inherit them and
+    // page in through the same loaders at runtime.
+    auto options = vsg::Options::create();
+    options->add(vsgXchange::all::create());
+    options->paths = vsg::getEnvPaths("VSG_FILE_PATH");
+    arguments.read(options);
+
+    vsg::Path filename = arguments[1];
+    auto scene = vsg::read_cast<vsg::Node>(filename, options);
+    if (!scene)
+    {
+        std::cerr << "Failed to load: " << filename
+                  << "\n(If this is a .ive, check that vsgXchange reports "
+                     "OSG support ON and OSG's image plugins are present.)\n";
+        return 1;
+    }
+
+    auto windowTraits = vsg::WindowTraits::create();
+    windowTraits->windowTitle = "ive PoC viewer";
+    windowTraits->debugLayer = arguments.read({"--debug", "-d"});
+
+    auto viewer = vsg::Viewer::create();
+    auto window = vsg::Window::create(windowTraits);
+    if (!window)
+    {
+        std::cerr << "Could not create window (Vulkan device/driver issue?)\n";
+        return 1;
+    }
+    viewer->addWindow(window);
+
+    // Frame the whole model.
+    // useNodeBounds=false makes ComputeBounds measure the actual geometry instead of the
+    // CullNode/PagedLOD bounding *spheres*. A paged terrain's root sphere is as tall as the
+    // tile is wide, so with spheres a flat terrain reports a huge z-extent and the camera
+    // ends up far away looking at the map nearly edge-on.
+    vsg::ComputeBounds computeBounds;
+    computeBounds.useNodeBounds = false;
+    scene->accept(computeBounds);
+    vsg::dvec3 centre = (computeBounds.bounds.min + computeBounds.bounds.max) * 0.5;
+    double radius = vsg::length(computeBounds.bounds.max - computeBounds.bounds.min) * 0.6;
+    if (radius <= 0.0) radius = 1.0;
+
+    constexpr double nearFarRatio = 0.0005;
+    // 45 degree oblique view from the south with north up the screen; orbit/zoom with the trackball.
+    auto lookAt = vsg::LookAt::create(
+        centre + vsg::dvec3(0.0, -radius * 1.8, radius * 1.8),  // eye
+        centre,                                                 // target
+        vsg::dvec3(0.0, 0.0, 1.0));                             // up (z-up, VPB convention)
+
+    auto perspective = vsg::Perspective::create(
+        30.0,
+        static_cast<double>(window->extent2D().width) /
+            static_cast<double>(window->extent2D().height),
+        nearFarRatio * radius,
+        radius * 10.0);
+
+    auto camera = vsg::Camera::create(perspective, lookAt,
+                                      vsg::ViewportState::create(window->extent2D()));
+
+    auto commandGraph = vsg::createCommandGraphForView(window, camera, scene);
+    viewer->assignRecordAndSubmitTaskAndPresentation({commandGraph});
+
+    viewer->addEventHandler(vsg::CloseHandler::create(viewer));   // Esc / close button
+    viewer->addEventHandler(vsg::Trackball::create(camera));      // LMB orbit, RMB zoom, MMB pan
+
+    // compile() walks the scene, uploads GPU resources, and -- key for your
+    // terrain database -- detects PagedLOD nodes and spins up the database
+    // pager automatically.
+    viewer->compile();
+
+    while (viewer->advanceToNextFrame())
+    {
+        viewer->handleEvents();
+        viewer->update();
+        viewer->recordAndSubmit();
+        viewer->present();
+    }
+
+    return 0;
+}
