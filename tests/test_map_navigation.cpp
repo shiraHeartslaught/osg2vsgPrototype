@@ -344,3 +344,34 @@ TEST(MapNavigationHandler, ZoomLevelRangeBoundsTheZoomNotTheData)
     handler->setZoomLevel(-3.0);
     EXPECT_NEAR(handler->zoomLevel(), 0.0, 1e-9);
 }
+
+TEST(MapNavigationHandler, LeavesEventsAlreadyHandledAlone)
+{
+    auto camera = makeTopDownCamera(2.0e6);
+    auto handler = ivevsg::MapNavigationHandler::create(camera);
+    const auto now = vsg::clock::now();
+    const ivevsg::MapCamera before = handler->mapCamera();
+
+    auto press = vsg::ButtonPressEvent::create(nullptr, now, 400, 300, vsg::BUTTON_MASK_1, 1);
+    press->handled = true; // an ImGui window took the click
+    press->accept(*handler);
+    vsg::MoveEvent::create(nullptr, now, 500, 340, vsg::BUTTON_MASK_1)->accept(*handler);
+    EXPECT_DOUBLE_EQ(handler->mapCamera().centre.x, before.centre.x);
+    EXPECT_DOUBLE_EQ(handler->mapCamera().centre.y, before.centre.y);
+
+    auto wheel = vsg::ScrollWheelEvent::create(nullptr, now, vsg::vec3(0.0f, 1.0f, 0.0f));
+    wheel->handled = true;
+    wheel->accept(*handler);
+    EXPECT_DOUBLE_EQ(handler->mapCamera().altitude, before.altitude);
+
+    auto key = vsg::KeyPressEvent::create(nullptr, now, vsg::KEY_Plus, vsg::KEY_Plus, vsg::MODKEY_OFF);
+    key->handled = true;
+    key->accept(*handler);
+    EXPECT_DOUBLE_EQ(handler->mapCamera().altitude, before.altitude);
+
+    // the pointer position is still tracked, so a cursor readout keeps working over the UI
+    const auto pointer = handler->lastPointer();
+    EXPECT_TRUE(pointer.valid);
+    EXPECT_DOUBLE_EQ(pointer.x, 500.0);
+    EXPECT_DOUBLE_EQ(pointer.y, 340.0);
+}

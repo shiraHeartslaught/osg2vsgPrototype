@@ -1,8 +1,11 @@
 #include <ivevsg/CameraFraming.h>
 #include <ivevsg/SceneBounds.h>
+#include <ivevsg/SceneLoader.h>
 #include <ivevsg/ViewerApp.h>
 
 #include <vsg/all.h>
+#include <vsgImGui/RenderImGui.h>
+#include <vsgImGui/SendEventsToImGui.h>
 
 #include <algorithm>
 #include <cmath>
@@ -14,6 +17,17 @@ namespace ivevsg
         _settings(std::move(settings)),
         _projection(std::move(projection))
     {
+    }
+
+    ViewerApp::~ViewerApp() = default;
+
+    void ViewerApp::addUi(std::function<bool()> panel)
+    {
+        if (!panel) return;
+        if (_imgui)
+            _imgui->add(panel);
+        else
+            _pendingPanels.push_back(std::move(panel));
     }
 
     bool ViewerApp::initialize(vsg::ref_ptr<vsg::Node> scene, vsg::ref_ptr<vsg::Node> focus)
@@ -58,10 +72,21 @@ namespace ivevsg
             _perspective = vsg::Perspective::create(_settings.fieldOfViewDegrees, aspect, pose.nearPlane, pose.farPlane);
             _camera = vsg::Camera::create(_perspective, _lookAt, vsg::ViewportState::create(extent));
 
-            auto commandGraph = vsg::createCommandGraphForView(_window, _camera, _scene);
+            // the same graph vsg::createCommandGraphForView() builds (view + headlight), with the ImGui
+            // overlay drawn after the view inside the same render pass
+            auto renderGraph = vsg::createRenderGraphForView(_window, _camera, _scene);
+            auto commandGraph = vsg::CommandGraph::create(_window, renderGraph);
+            if (_settings.ui)
+            {
+                _imgui = vsgImGui::RenderImGui::create(_window);
+                for (auto& panel : _pendingPanels) _imgui->add(panel);
+                _pendingPanels.clear();
+                renderGraph->addChild(_imgui);
+            }
             _viewer->assignRecordAndSubmitTaskAndPresentation({commandGraph});
 
-            _viewer->addEventHandler(vsg::CloseHandler::create(_viewer)); // Esc / close button
+            if (_imgui) _viewer->addEventHandler(vsgImGui::SendEventsToImGui::create()); // first: marks events ImGui consumes as handled
+            _viewer->addEventHandler(vsg::CloseHandler::create(_viewer));              // Esc / close button
             if (mapMode)
             {
                 MapNavigationSettings navigation = _settings.mapNavigation;
@@ -86,6 +111,69 @@ namespace ivevsg
             return false;
         }
         return true;
+    }
+
+    bool ViewerApp::loadLayer(const std::string& path, const std::string& name)
+    {
+        _lastLayerError.clear();
+        if (!_layers || !_loader)
+        {
+            _lastLayerError = "no layer stack or loader attached";
+            return false;
+        }
+        const LoadResult loaded = _loader->load(path);
+        if (!loaded)
+        {
+            _lastLayerError = loaded.error;
+            return false;
+        }
+        if (_viewer && _viewer->compileManager)
+        {
+            try
+            {
+                vsg::CompileResult result = _viewer->compileManager->compile(loaded.node);
+                if (result) vsg::updateViewer(*_viewer, result); // registers new PagedLODs with the pager etc.
+            }
+            catch (const vsg::Exception& e)
+            {
+                _lastLayerError = "Vulkan error compiling " + path + ": " + e.message;
+                return false;
+            }
+        }
+        std::string layerName = name;
+        if (layerName.empty()) layerName = vsg::simpleFilename(vsg::Path(path)).string();
+        _layers->addLayer(layerName, loaded.node);
+        return true;
+    }
+
+    void ViewerApp::queueLayerLoad(const std::string& path, const std::string& name)
+    {
+        _pendingLayerLoads.emplace_back(path, name);
+    }
+
+    std::vector<std::string> ViewerApp::loadingLayers() const
+    {
+        std::vector<std::string> names;
+        for (const auto& [path, name] : _pendingLayerLoads) names.push_back(name.empty() ? vsg::simpleFilename(vsg::Path(path)).string() : name);
+        if (_asyncLoader)
+        {
+            for (auto& name : _asyncLoader->inFlight()) names.push_back(name);
+        }
+        return names;
+    }
+
+    void ViewerApp::frameNode(vsg::ref_ptr<vsg::Node> node)
+    {
+        if (!node || !_projection) return;
+        const vsg::dbox bounds = computeGeometryBounds(*node);
+        if (!bounds.valid()) return;
+        if (_mapNavigation)
+        {
+            const CameraPose pose = _projection->framingPose(bounds, 90.0);
+            _mapNavigation->setMapCamera(MapCamera{{pose.centre.x, pose.centre.y}, pose.eye.z - _mapNavigation->settings().groundHeight});
+            return;
+        }
+        applyPose(_projection->framingPose(bounds, _settings.framingElevationDegrees));
     }
 
     void ViewerApp::setUnderlay(vsg::ref_ptr<vsg::MatrixTransform> underlay, double depthFraction)
@@ -146,14 +234,49 @@ namespace ivevsg
         if (!_viewer->advanceToNextFrame()) return false;
 
         _viewer->handleEvents();
-        if (_underlay)
+        // hand queued layer loads to worker threads once the viewer can compile, and merge finished ones
+        if (!_pendingLayerLoads.empty() && _loader && _viewer->compileManager)
         {
-            // keep the underlay a fixed fraction of the eye height below the data plane
+            if (!_asyncLoader)
+            {
+                vsg::ref_ptr<vsg::Viewer> viewer = _viewer;
+                _asyncLoader = std::make_unique<AsyncLayerLoader>(_loader, [viewer](vsg::ref_ptr<vsg::Node> node) {
+                    return viewer->compileManager->compile(node); // CompileManager is thread safe
+                });
+            }
+            for (const auto& [path, name] : _pendingLayerLoads) _asyncLoader->request(path, name);
+            _pendingLayerLoads.clear();
+        }
+        if (_asyncLoader)
+        {
+            for (LayerLoadOutcome& outcome : _asyncLoader->takeCompleted())
+            {
+                if (outcome.ok())
+                {
+                    if (outcome.compileResult) vsg::updateViewer(*_viewer, outcome.compileResult); // main thread: registers pager/descriptor needs
+                    if (_layers) _layers->addLayer(outcome.name, outcome.node);
+                    _lastLayerError.clear();
+                }
+                else
+                {
+                    _lastLayerError = outcome.error;
+                    std::cerr << "layer load failed: " << outcome.path << ": " << outcome.error << "\n";
+                }
+                if (onLayerLoaded) onLayerLoaded(outcome.name, outcome.ok(), outcome.error, outcome.seconds);
+            }
+        }
+        {
             double altitude = 1.0;
             if (_mapNavigation) altitude = _mapNavigation->mapCamera().altitude;
             else if (_lookAt) altitude = std::abs(_lookAt->eye.z);
-            const double depth = std::max(1.0, altitude * _underlayDepthFraction);
-            _underlay->matrix = vsg::translate(0.0, 0.0, -depth);
+            // keep the underlay a fixed fraction of the eye height below the data plane ...
+            if (_underlay) _underlay->matrix = vsg::translate(0.0, 0.0, -std::max(1.0, altitude * _underlayDepthFraction));
+            // ... and each further data layer a little above the previous one, so overlaps never z-fight
+            if (_layers)
+            {
+                for (std::size_t i = 1; i < _layers->layerCount(); ++i)
+                    _layers->setLayerHeight(i, std::max(0.5, altitude * layerSeparationFraction) * static_cast<double>(i));
+            }
         }
         if (_mapNavigation && onMapViewChanged)
         {

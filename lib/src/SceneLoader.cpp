@@ -7,9 +7,11 @@
 #include <osgDB/Registry>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 
 #ifndef IVEVSG_OSG_PLUGIN_DIR
 #    define IVEVSG_OSG_PLUGIN_DIR ""
@@ -17,21 +19,43 @@
 
 namespace ivevsg
 {
-    namespace
+    /// Sits first in the reader chain, notes each request and declines it so the real readers run.
+    class SceneLoader::LoadMonitor : public vsg::Inherit<vsg::ReaderWriter, LoadMonitor>
     {
-        /// Sits first in the reader chain, prints each request and declines it so the real readers run.
-        class ReadLogger : public vsg::Inherit<vsg::ReaderWriter, ReadLogger>
+    public:
+        explicit LoadMonitor(bool print) : _print(print) {}
+
+        vsg::ref_ptr<vsg::Object> read(const vsg::Path& filename, vsg::ref_ptr<const vsg::Options>) const override
         {
-        public:
-            vsg::ref_ptr<vsg::Object> read(const vsg::Path& filename, vsg::ref_ptr<const vsg::Options>) const override
+            ++_requests;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                _lastFile = filename.string();
+            }
+            if (_print)
             {
                 static const auto start = std::chrono::steady_clock::now();
                 const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
                 std::cout << "load: " << filename << "  (t=" << seconds << " s)" << std::endl;
-                return {};
             }
-        };
-    } // namespace
+            return {};
+        }
+
+        LoadStats stats() const
+        {
+            LoadStats stats;
+            stats.requests = _requests.load();
+            std::lock_guard<std::mutex> lock(_mutex);
+            stats.lastFile = _lastFile;
+            return stats;
+        }
+
+    private:
+        bool _print = false;
+        mutable std::atomic<std::size_t> _requests{0};
+        mutable std::mutex _mutex;
+        mutable std::string _lastFile;
+    };
 
     LoaderSettings SceneLoader::defaultSettings()
     {
@@ -74,10 +98,18 @@ namespace ivevsg
         registerOsgPluginDirectory(_settings.osgPluginDirectory);
 
         _options = vsg::Options::create();
-        if (_settings.logReads) _options->add(ReadLogger::create());
+        _monitor = LoadMonitor::create(_settings.logReads);
+        _options->add(_monitor);
         _options->add(vsgXchange::all::create());
         _options->paths = vsg::getEnvPaths("VSG_FILE_PATH");
         for (const auto& path : _settings.searchPaths) _options->paths.push_back(vsg::Path(path));
+    }
+
+    SceneLoader::~SceneLoader() = default;
+
+    LoadStats SceneLoader::loadStats() const
+    {
+        return _monitor ? _monitor->stats() : LoadStats{};
     }
 
     LoadResult SceneLoader::load(const std::string& filename) const

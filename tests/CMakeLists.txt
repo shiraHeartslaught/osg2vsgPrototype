@@ -1,6 +1,7 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(ivevsg_tests
+    test_async.cpp
     test_base_map.cpp
     test_map_navigation.cpp
     test_map_scene.cpp

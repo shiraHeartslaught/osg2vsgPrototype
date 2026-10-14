@@ -4,6 +4,7 @@
 #include <vsg/io/Options.h>
 #include <vsg/nodes/Node.h>
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,13 @@ namespace ivevsg
         bool logReads = false;
     };
 
+    /// What the loader (and the database pager, through the shared options) has read so far.
+    struct LoadStats
+    {
+        std::size_t requests = 0; // files handed to the reader chain, including paged tiles
+        std::string lastFile;
+    };
+
     struct LoadResult
     {
         vsg::ref_ptr<vsg::Node> node;
@@ -37,6 +45,7 @@ namespace ivevsg
     {
     public:
         explicit SceneLoader(LoaderSettings settings = defaultSettings());
+        ~SceneLoader();
 
         static LoaderSettings defaultSettings();
 
@@ -55,8 +64,13 @@ namespace ivevsg
         vsg::ref_ptr<vsg::Options> options() const { return _options; }
         const LoaderSettings& settings() const { return _settings; }
 
+        /// Thread-safe snapshot of the read activity (the pager reads on its own threads).
+        LoadStats loadStats() const;
+
     private:
+        class LoadMonitor;
         LoaderSettings _settings;
         vsg::ref_ptr<vsg::Options> _options;
+        vsg::ref_ptr<LoadMonitor> _monitor;
     };
 } // namespace ivevsg

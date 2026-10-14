@@ -9,9 +9,25 @@ A VulkanSceneGraph web-map style viewer: a NASA Blue Marble base map on the Merc
 OpenSceneGraph `.ive` paged terrain (or anything vsgXchange can read) draped on top.
 
 ```
-ive_poc [scene file] [--base-tiles <tiles/root.ive>] [--base <image>] [--no-base] [--trackball]
-        [--debug|-d] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--log-loads]
+ive_poc [scene files ...] [--layer FILE ...] [--base-tiles <tiles/root.ive>] [--base <image>] [--no-base]
+        [--trackball] [--debug|-d] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z]
+        [--min-zoom Z] [--log-loads] [--no-ui]
 ```
+
+Every scene file is loaded as a layer above the base map; the first one frames the start view.
+Layers can also be added while running, from the panel's "Browse..." button (the system file picker,
+through the xdg-desktop-portal on Linux, so KDE shows its own dialog), the typed-path field with
+"Add layer", or `--layer FILE`. Neither interrupts rendering: the picker runs on a worker thread and
+is polled by the panel, and each layer load runs read, OSG conversion and GPU compilation (through
+VSG's thread-safe CompileManager) on its own worker thread; the main thread only registers the
+result with the viewer and inserts it between frames. In-flight loads are listed in the panel. The
+panel lists the layers with show/hide, Frame (re-centre on that layer) and Remove.
+
+A Dear ImGui panel (rendered by vsgImGui as a node after the view, with its event handler ahead of
+the map navigation so clicks on the panel never move the map) shows zoom, metres per pixel, OGC tile
+level, altitude, centre and cursor coordinates, go-to / home / max-zoom controls, layer checkboxes,
+paging statistics and frame rate. `--no-ui` turns it off. Register more panels with
+`ViewerApp::addUi()`; see `Hud.h`.
 
 With no arguments the viewer shows the default tile pyramid (`IVEVSG_DEFAULT_TILES` in CMake, the
 level-11 Blue Marble set) and falls back to the single image if that is missing. `--zoom` takes any
@@ -72,7 +88,10 @@ drawn and LOD-selected as if viewed from zoom 9.5.
   - `SceneLoader` — vsgXchange reader set, OSG plugin discovery, `.ive` support detection
   - `SceneBounds`, `CameraFraming` — geometry bounds and camera placement math
   - `BaseMap` — Blue Marble quad under the data, with CPU mipmaps
-  - `MapScene` — `createLayeredScene` (base under data) and `createWrappedScene` (world repeated along x)
+  - `MapScene` — `LayerStack` (base + any number of switchable, removable layers), `createWrappedScene`
+  - `Hud` — the ImGui map panel (`createMapHud`)
+  - `FileDialog` — native file picker (nativefiledialog-extended, portal backend) + `AsyncFileDialog`
+  - `AsyncLayerLoader` — worker-thread read/convert/compile of layers, merged by the viewer between frames
   - `MapNavigation` — Web Mercator zoom levels, pan/zoom arithmetic, `MapNavigationHandler`
   - `TileScheme` — OGC WebMercatorQuad tile matrix set maths (extents, resolutions, scale denominators)
   - `TileSetBuilder` — GDAL + OSG tiler behind `tools/ivetiler`

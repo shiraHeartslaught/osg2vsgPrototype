@@ -3,9 +3,17 @@
 // zoom about the cursor, arrows pan, + / - zoom, Home or Space returns to the start view, Esc quits.
 //
 // Usage:
-//   ive_poc [scene file] [--base-tiles <tiles/root.ive>] [--base <image>] [--no-base] [--trackball]
-//           [--debug|-d] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z]
-//           [--log-loads]
+//   ive_poc [scene files ...] [--layer FILE ...] [--base-tiles <tiles/root.ive>] [--base <image>] [--no-base]
+//           [--trackball] [--debug|-d] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z]
+//           [--min-zoom Z] [--log-loads] [--no-ui]
+//
+// Every scene file becomes a layer above the base map (the first one frames the start view); --layer
+// files are added after start-up through the runtime path the panel's "Add layer" button also uses;
+// loads run on worker threads (read, convert, GPU compile) so rendering is never interrupted.
+// The panel lists the layers with show/hide, Frame and Remove, plus a field to add a file as a layer.
+//
+// A Dear ImGui panel (vsgImGui) shows the view, go-to / home / max-zoom controls, layer toggles and
+// paging statistics; --no-ui turns it off.
 //
 // The base map is the OGC WebMercatorQuad .ive pyramid built by ivetiler (the default set baked in at
 // configure time, or --base-tiles); VSG pages the tile level matching the view's metres per pixel in
@@ -20,6 +28,7 @@
 // The heavy lifting lives in the ivevsg library (lib/), which is what the Google Test suite exercises.
 
 #include <ivevsg/BaseMap.h>
+#include <ivevsg/Hud.h>
 #include <ivevsg/MapScene.h>
 #include <ivevsg/MercatorProjection.h>
 #include <ivevsg/SceneLoader.h>
@@ -33,6 +42,8 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <vector>
 
 #ifndef IVEVSG_DEFAULT_TILES
 #    define IVEVSG_DEFAULT_TILES ""
@@ -47,6 +58,7 @@ int main(int argc, char** argv)
     settings.maxFrames = arguments.value(-1, "--frames");
     settings.framingElevationDegrees = arguments.value(45.0, "--elevation");
     settings.navigation = arguments.read("--trackball") ? ivevsg::NavigationMode::Trackball : ivevsg::NavigationMode::Map;
+    settings.ui = !arguments.read("--no-ui");
 
     ivevsg::BaseMapSettings baseMapSettings;
     const bool noBaseMap = arguments.read("--no-base");
@@ -60,7 +72,9 @@ int main(int argc, char** argv)
     double centerLongitude = 0.0, centerLatitude = 0.0;
     const bool haveCenter = arguments.read("--center", centerLongitude, centerLatitude);
     std::string baseTiles = arguments.value(std::string(), "--base-tiles");
-    const bool logLoads = arguments.read("--log-loads"); // all options must be consumed before the positional scene file
+    std::vector<std::string> runtimeLayers;
+    for (std::string path; arguments.read("--layer", path);) runtimeLayers.push_back(path);
+    const bool logLoads = arguments.read("--log-loads"); // all options must be consumed before the positional scene files
 
     // default base: the tile pyramid baked in at configure time, when present and nothing else was asked for
     bool defaultTiles = false;
@@ -70,29 +84,34 @@ int main(int argc, char** argv)
         defaultTiles = true;
     }
 
-    const std::string filename = (argc >= 2) ? argv[1] : std::string();
-    if (filename.empty() && baseTiles.empty() && noBaseMap)
+    std::vector<std::string> filenames;
+    for (int i = 1; i < argc; ++i) filenames.emplace_back(argv[i]);
+    if (filenames.empty() && runtimeLayers.empty() && baseTiles.empty() && noBaseMap)
     {
-        std::cerr << "usage: " << argv[0] << " [scene file (.vsgb/.vsgt/.ive/...)] [--base-tiles <root.ive>] [--base <image>] [--no-base] [--trackball] [--debug] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--log-loads]\n";
+        std::cerr << "usage: " << argv[0] << " [scene files ...] [--layer FILE ...] [--base-tiles <root.ive>] [--base <image>] [--no-base] [--trackball] [--debug] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--log-loads] [--no-ui]\n";
         return 1;
     }
 
     ivevsg::LoaderSettings loaderSettings = ivevsg::SceneLoader::defaultSettings();
     loaderSettings.logReads = logLoads;
-    ivevsg::SceneLoader loader(loaderSettings);
+    auto loader = std::make_shared<ivevsg::SceneLoader>(loaderSettings);
     std::cout << "vsgXchange OSG support: " << (ivevsg::SceneLoader::supportsOsg() ? "ON" : "OFF")
-              << "  (OSG plugins: " << loader.settings().osgPluginDirectory << ")\n";
+              << "  (OSG plugins: " << loader->settings().osgPluginDirectory << ")\n";
 
+    // every scene file is a layer above the base; the first one frames the start view
+    auto layers = std::make_shared<ivevsg::LayerStack>();
     vsg::ref_ptr<vsg::Node> data;
-    if (!filename.empty())
+    for (const std::string& filename : filenames)
     {
-        const ivevsg::LoadResult loaded = loader.load(filename);
+        const ivevsg::LoadResult loaded = loader->load(filename);
         if (!loaded)
         {
             std::cerr << "Failed to load " << filename << ": " << loaded.error << "\n";
             return 1;
         }
-        data = loaded.node;
+        layers->addLayer(vsg::simpleFilename(vsg::Path(filename)).string(), loaded.node);
+        if (!data) data = loaded.node;
+        std::cout << "Layer: " << filename << "\n";
     }
 
     auto projection = std::make_shared<ivevsg::MercatorProjection>();
@@ -103,7 +122,7 @@ int main(int argc, char** argv)
     vsg::ref_ptr<vsg::MatrixTransform> underlay;
     if (!baseTiles.empty())
     {
-        const ivevsg::LoadResult tiles = loader.load(baseTiles);
+        const ivevsg::LoadResult tiles = loader->load(baseTiles);
         if (!tiles)
         {
             std::cerr << "Failed to load tile set " << baseTiles << ": " << tiles.error << "\n";
@@ -115,16 +134,17 @@ int main(int argc, char** argv)
     }
     else if (!noBaseMap)
     {
-        const ivevsg::BaseMapResult baseMap = ivevsg::createBaseMap(baseMapSettings, loader.options());
+        const ivevsg::BaseMapResult baseMap = ivevsg::createBaseMap(baseMapSettings, loader->options());
         std::cout << "Base map: " << baseMap.message << "\n";
         underlay = vsg::MatrixTransform::create();
         underlay->addChild(baseMap.node);
     }
     vsg::ref_ptr<vsg::Node> base = underlay;
 
-    // Scene = base underneath, data on top. The initial view frames the data when there is some.
-    vsg::ref_ptr<vsg::Node> world = data;
-    if (base) world = ivevsg::createLayeredScene(base, data);
+    // Scene = base underneath, data on top, each switchable from the panel. The initial view frames
+    // the data when there is some.
+    if (base) layers->setBase(base);
+    vsg::ref_ptr<vsg::Node> world = layers->node();
     vsg::ref_ptr<vsg::Node> focus = data ? data : base;
 
     // Projections that repeat sideways get the world drawn again on each side so the screen is always
@@ -155,6 +175,24 @@ int main(int argc, char** argv)
                   << "  centre lon " << centre.longitude << " lat " << centre.latitude << "\n";
     };
     if (underlay) app.setUnderlay(underlay);
+    app.setLayers(layers);
+    app.setLoader(loader);
+    app.onLayerLoaded = [](const std::string& name, bool ok, const std::string& error, double seconds) {
+        if (ok)
+            std::cout << "Layer loaded: " << name << " (" << seconds << " s on a worker thread)\n";
+        else
+            std::cerr << "Layer failed: " << name << ": " << error << "\n";
+    };
+    if (settings.ui)
+    {
+        ivevsg::MapHudContext hud;
+        hud.app = &app;
+        hud.projection = projection;
+        hud.layers = layers;
+        hud.loader = loader;
+        app.addUi(ivevsg::createMapHud(hud));
+    }
+    for (const std::string& path : runtimeLayers) app.queueLayerLoad(path); // goes through the runtime path at the first frame
     if (!app.initialize(scene, focus))
     {
         std::cerr << app.error() << "\n";

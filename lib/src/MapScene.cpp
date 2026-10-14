@@ -12,6 +12,80 @@ namespace ivevsg
         return group;
     }
 
+    namespace
+    {
+        void setMask(vsg::ref_ptr<vsg::Switch> node, std::size_t index, bool visible)
+        {
+            if (node && index < node->children.size()) node->children[index].mask = visible ? vsg::MASK_ALL : vsg::MASK_OFF;
+        }
+        bool maskOn(vsg::ref_ptr<vsg::Switch> node, std::size_t index)
+        {
+            return node && index < node->children.size() && node->children[index].mask != vsg::MASK_OFF;
+        }
+    } // namespace
+
+    LayerStack::LayerStack() :
+        _switch(vsg::Switch::create())
+    {
+    }
+
+    void LayerStack::setBase(vsg::ref_ptr<vsg::Node> base)
+    {
+        if (_base) _switch->children.erase(_switch->children.begin());
+        _base = base;
+        if (_base) _switch->children.insert(_switch->children.begin(), vsg::Switch::Child{vsg::MASK_ALL, _base});
+    }
+
+    void LayerStack::setBaseVisible(bool visible)
+    {
+        if (_base) setMask(_switch, 0, visible);
+    }
+
+    bool LayerStack::baseVisible() const
+    {
+        return _base && maskOn(_switch, 0);
+    }
+
+    std::size_t LayerStack::addLayer(const std::string& name, vsg::ref_ptr<vsg::Node> node)
+    {
+        auto placement = vsg::MatrixTransform::create();
+        placement->addChild(node);
+        _layers.push_back(Layer{name, node, placement});
+        _switch->addChild(true, placement);
+        return _layers.size() - 1;
+    }
+
+    void LayerStack::setLayerHeight(std::size_t index, double z)
+    {
+        if (index < _layers.size()) _layers[index].placement->matrix = vsg::translate(0.0, 0.0, z);
+    }
+
+    bool LayerStack::removeLayer(std::size_t index)
+    {
+        if (index >= _layers.size()) return false;
+        _switch->children.erase(_switch->children.begin() + static_cast<std::ptrdiff_t>(switchIndex(index)));
+        _layers.erase(_layers.begin() + static_cast<std::ptrdiff_t>(index));
+        return true;
+    }
+
+    void LayerStack::setLayerVisible(std::size_t index, bool visible)
+    {
+        if (index < _layers.size()) setMask(_switch, switchIndex(index), visible);
+    }
+
+    bool LayerStack::layerVisible(std::size_t index) const
+    {
+        return index < _layers.size() && maskOn(_switch, switchIndex(index));
+    }
+
+    LayerStack createLayerStack(vsg::ref_ptr<vsg::Node> baseMap, vsg::ref_ptr<vsg::Node> overlay)
+    {
+        LayerStack stack;
+        if (baseMap) stack.setBase(baseMap);
+        if (overlay) stack.addLayer("data", overlay);
+        return stack;
+    }
+
     vsg::ref_ptr<vsg::Group> createWrappedScene(vsg::ref_ptr<vsg::Node> world, double worldWidth, int copiesEachSide)
     {
         auto group = vsg::Group::create();

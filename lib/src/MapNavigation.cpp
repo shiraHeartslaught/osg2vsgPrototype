@@ -190,6 +190,7 @@ namespace ivevsg
         _lastX = buttonPress.x;
         _lastY = buttonPress.y;
         _havePointer = true;
+        if (buttonPress.handled) return; // e.g. a click on an ImGui window
         if (buttonPress.button == 1)
         {
             _dragging = true;
@@ -216,6 +217,7 @@ namespace ivevsg
         _lastY = moveEvent.y;
         _havePointer = true;
 
+        if (moveEvent.handled) return;
         if (_dragging && (moveEvent.mask & vsg::BUTTON_MASK_1))
         {
             _current = clampCamera(panByPixels(_current, dx, dy, viewportHeight(), _settings.fieldOfViewDegrees), _settings, viewportWidth(), viewportHeight());
@@ -226,7 +228,7 @@ namespace ivevsg
 
     void MapNavigationHandler::apply(vsg::ScrollWheelEvent& scrollWheel)
     {
-        if (scrollWheel.delta.y == 0.0f) return;
+        if (scrollWheel.handled || scrollWheel.delta.y == 0.0f) return;
         const double factor = scrollWheel.delta.y > 0.0f ? _settings.scrollZoomFactor : 1.0 / _settings.scrollZoomFactor;
         const double px = _havePointer ? _lastX : viewportWidth() * 0.5;
         const double py = _havePointer ? _lastY : viewportHeight() * 0.5;
@@ -237,6 +239,7 @@ namespace ivevsg
 
     void MapNavigationHandler::apply(vsg::KeyPressEvent& keyPress)
     {
+        if (keyPress.handled) return; // e.g. typing into an ImGui field
         const double panPixels = _settings.keyPanFraction * viewportHeight();
         const double cx = viewportWidth() * 0.5;
         const double cy = viewportHeight() * 0.5;

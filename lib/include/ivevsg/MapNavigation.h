@@ -70,6 +70,7 @@ namespace ivevsg
     /// Google-Maps style navigation for a flat map: left-drag pans, the scroll wheel zooms about the
     /// cursor, arrow keys pan, + / - zoom about the centre, Home or Space returns to the home view.
     /// The camera always looks straight down with north up; there is no rotation or tilt.
+    /// Events already marked handled (e.g. by an ImGui handler placed earlier) are left alone.
     class MapNavigationHandler : public vsg::Inherit<vsg::Visitor, MapNavigationHandler>
     {
     public:
@@ -99,6 +100,15 @@ namespace ivevsg
         const MapNavigationSettings& settings() const { return _settings; }
         double viewportWidth() const;
         double viewportHeight() const;
+
+        /// Last known pointer position in viewport pixels (for e.g. a cursor coordinate readout).
+        struct PointerPosition
+        {
+            double x = 0.0;
+            double y = 0.0;
+            bool valid = false;
+        };
+        PointerPosition lastPointer() const { return {_lastX, _lastY, _havePointer}; }
 
     private:
         void applyToCamera();

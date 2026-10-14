@@ -9,8 +9,11 @@ set(IVEVSG_OSG_PLUGINS_RELEASE "${_osg_plugins_release}" PARENT_SCOPE)
 set(IVEVSG_OSG_PLUGINS_DEBUG   "${_osg_plugins_debug}"   PARENT_SCOPE)
 
 add_library(ivevsg
+    src/AsyncLayerLoader.cpp
     src/BaseMap.cpp
     src/CameraFraming.cpp
+    src/FileDialog.cpp
+    src/Hud.cpp
     src/MapNavigation.cpp
     src/MapScene.cpp
     src/MercatorProjection.cpp
@@ -35,5 +38,7 @@ target_compile_definitions(ivevsg PRIVATE "IVEVSG_DATA_DIR=\"${PROJECT_SOURCE_DI
 # georeferenced rasters for the tiler) are implementation details of the library.
 find_package(unofficial-osg CONFIG REQUIRED)
 find_package(GDAL CONFIG REQUIRED)
-target_link_libraries(ivevsg PRIVATE unofficial::osg::osg unofficial::osg::osgDB GDAL::GDAL)
+find_package(vsgImGui CONFIG REQUIRED) # Dear ImGui rendered by VSG (RenderImGui node + event forwarding)
+find_package(nfd CONFIG REQUIRED)      # native file dialog (xdg-desktop-portal on Linux) for "Browse..."
+target_link_libraries(ivevsg PRIVATE unofficial::osg::osg unofficial::osg::osgDB GDAL::GDAL vsgImGui::vsgImGui nfd::nfd)
 target_compile_definitions(ivevsg PRIVATE IVEVSG_HAS_OSG=$<IF:$<BOOL:${IVEVSG_HAS_OSG}>,1,0>)

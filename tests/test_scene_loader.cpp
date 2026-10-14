@@ -108,3 +108,18 @@ TEST(SceneLoader, LoadsAPagedIveTerrainDatabase)
         EXPECT_NEAR(bounds.max.y - bounds.min.y, 11349369.96, 11349369.96 * 0.01);
     }
 }
+
+TEST(SceneLoader, CountsWhatItReads)
+{
+    const std::filesystem::path file = std::filesystem::temp_directory_path() / "ivevsg_loader_stats.vsgt";
+    ASSERT_TRUE(vsg::write(makeTriangleScene(), vsg::Path(file.string())));
+
+    ivevsg::SceneLoader loader;
+    EXPECT_EQ(loader.loadStats().requests, 0u);
+    ASSERT_TRUE(loader.load(file.string()));
+    const ivevsg::LoadStats stats = loader.loadStats();
+    EXPECT_EQ(stats.requests, 1u);
+    EXPECT_NE(stats.lastFile.find("ivevsg_loader_stats.vsgt"), std::string::npos);
+
+    std::filesystem::remove(file);
+}
