@@ -1,3 +1,4 @@
+#include <ivevsg/OsgReader.h>
 #include <ivevsg/SceneLoader.h>
 
 #include <vsg/all.h>
@@ -100,7 +101,8 @@ namespace ivevsg
         _options = vsg::Options::create();
         _monitor = LoadMonitor::create(_settings.logReads);
         _options->add(_monitor);
-        _options->add(vsgXchange::all::create());
+        _options->add(OsgReader::create());      // our OSG reader first: fix-ups before osg2vsg conversion
+        _options->add(vsgXchange::all::create()); // everything else (images, glTF, ...)
         _options->paths = vsg::getEnvPaths("VSG_FILE_PATH");
         for (const auto& path : _settings.searchPaths) _options->paths.push_back(vsg::Path(path));
     }

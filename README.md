@@ -85,7 +85,8 @@ drawn and LOD-selected as if viewed from zoom 9.5.
 
 - `lib/` — the `ivevsg` library (`ivevsg::ivevsg` CMake target):
   - `Projection` / `MercatorProjection` — geographic <-> world (EPSG:3857) and camera framing
-  - `SceneLoader` — vsgXchange reader set, OSG plugin discovery, `.ive` support detection
+  - `SceneLoader` — reader chain (load monitor, `OsgReader`, vsgXchange), OSG plugin discovery
+  - `OsgReader` — reads .ive/.osgb/.osgt/.osg with osgDB, normalises byte colour arrays, converts via osg2vsg
   - `SceneBounds`, `CameraFraming` — geometry bounds and camera placement math
   - `BaseMap` — Blue Marble quad under the data, with CPU mipmaps
   - `MapScene` — `LayerStack` (base + any number of switchable, removable layers), `createWrappedScene`
@@ -106,7 +107,8 @@ drawn and LOD-selected as if viewed from zoom 9.5.
 
 The top-level CMakeLists.txt points at the vcpkg toolchain, triplet and installed tree; vsg must be
 installed with the `windowing` feature and vsgxchange with the `osg` feature (overlay ports in the
-vcpkg checkout provide the latter plus two osg2vsg fixes). Reload the CMake project in CLion, or:
+vcpkg checkout provide the latter plus one osg2vsg fix for mipmapped RGB images; the byte-colour-array
+fix lives in this library's `OsgReader` rather than as a patch). Reload the CMake project in CLion, or:
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build build && (cd build && ctest)

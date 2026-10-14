@@ -17,6 +17,7 @@ add_library(ivevsg
     src/MapNavigation.cpp
     src/MapScene.cpp
     src/MercatorProjection.cpp
+    src/OsgReader.cpp
     src/Projection.cpp
     src/SceneBounds.cpp
     src/SceneLoader.cpp
@@ -40,5 +41,6 @@ find_package(unofficial-osg CONFIG REQUIRED)
 find_package(GDAL CONFIG REQUIRED)
 find_package(vsgImGui CONFIG REQUIRED) # Dear ImGui rendered by VSG (RenderImGui node + event forwarding)
 find_package(nfd CONFIG REQUIRED)      # native file dialog (xdg-desktop-portal on Linux) for "Browse..."
-target_link_libraries(ivevsg PRIVATE unofficial::osg::osg unofficial::osg::osgDB GDAL::GDAL vsgImGui::vsgImGui nfd::nfd)
+find_package(osg2vsg CONFIG REQUIRED)  # OSG -> VSG conversion, driven by our own OsgReader
+target_link_libraries(ivevsg PRIVATE unofficial::osg::osg unofficial::osg::osgDB GDAL::GDAL vsgImGui::vsgImGui nfd::nfd osg2vsg::osg2vsg)
 target_compile_definitions(ivevsg PRIVATE IVEVSG_HAS_OSG=$<IF:$<BOOL:${IVEVSG_HAS_OSG}>,1,0>)
