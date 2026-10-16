@@ -10,9 +10,31 @@ OpenSceneGraph `.ive` paged terrain (or anything vsgXchange can read) draped on 
 
 ```
 ive_poc [scene files ...] [--layer FILE ...] [--base-tiles <tiles/root.ive>] [--base <image>] [--no-base]
-        [--trackball] [--debug|-d] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z]
-        [--min-zoom Z] [--log-loads] [--no-ui]
+        [--projection mercator|globe] [--source-crs EPSG:xxxx] [--trackball] [--debug|-d] [--frames N]
+        [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--log-loads] [--no-ui]
 ```
+
+## Projections and reprojection
+
+`--projection mercator` (default) is the flat Web Mercator map; `--projection globe` is the WGS84
+geocentric frame (EPSG:4978), handled like a desk globe: dragging spins it about its polar axis
+(sideways motion changes longitude, vertical motion latitude, north stays up) with the ground
+following the cursor, and the view can be tilted and turned about the point under the screen centre.
+Both implement `Projection`, so a new one (e.g. a polar stereographic map) is a matter of
+implementing that interface.
+
+Every OSG file is reprojected on load into the current projection's frame by `OsgReader`, before the
+osg2vsg conversion: the file's own CRS (a VPB `CoordinateSystemNode`, else `--source-crs`, default
+EPSG:3857) goes through GDAL/OGR to geographic WGS84 and then into the target frame. Vertices are
+re-localised around each tile's reprojected origin (float precision), PagedLOD centres, radii and
+distance ranges move and scale with their content so paging keeps working, normals become the
+target's up vector, and single-quad tiles are tessellated (8 x 8 on the globe) so they curve. When
+source and target are the same CRS nothing is touched. The option values travel with the
+`vsg::Options` into every paged child, so the whole pyramid is reprojected consistently.
+
+PROJ and GDAL need their data folders (`share/proj/proj.db`, `share/gdal`): `PROJ_DATA` and
+`GDAL_DATA` are exported globally on this machine as fish universal variables, and the library falls
+back to the vcpkg paths recorded at configure time when they are absent (e.g. under CLion).
 
 Every scene file is loaded as a layer above the base map; the first one frames the start view.
 Layers can also be added while running, from the panel's "Browse..." button (the system file picker,
@@ -35,7 +57,14 @@ level; past the deepest tiles the deepest tiles are simply magnified. `--max-zoo
 `--min-zoom` (default 0) bound interactive zooming.
 
 Controls (Map mode): drag = pan, mouse wheel = zoom about the cursor, arrows = pan, `+`/`-` = zoom,
-`Home`/`Space` = back to the start view, `Esc` = quit. `--trackball` gives the free 3D orbit instead.
+`Home`/`Space` = back to the start view, `Esc` = quit.
+
+Controls (Globe mode): drag = spin the globe about its axis, mouse wheel = zoom about the cursor,
+middle drag = tilt / turn the view about the screen centre, right drag = zoom, arrows = spin,
+`+`/`-` = zoom, `Page Up`/`Page Down` = tilt, `N` = straight down with north up, `Home`/`Space` = back
+to the start view. `--elevation` (default 90 on the globe) tilts the start view.
+
+`--trackball` replaces either with VSG's free 3D orbit about the look-at point.
 
 On the Mercator projection the map repeats sideways, so you can pan east or west forever and the
 screen is always covered, and the camera stops the moment the map's top or bottom edge (latitude
@@ -84,7 +113,9 @@ drawn and LOD-selected as if viewed from zoom 9.5.
 ## Layout
 
 - `lib/` — the `ivevsg` library (`ivevsg::ivevsg` CMake target):
-  - `Projection` / `MercatorProjection` — geographic <-> world (EPSG:3857) and camera framing
+  - `Projection` / `MercatorProjection` / `GeocentricProjection` — geographic <-> world frames, camera framing, layer offsets
+  - `CrsTransform` — any GDAL CRS -> geographic WGS84 (OGR)
+  - `OsgReproject` — rewrites an OSG scene from its CRS into the current projection's frame
   - `SceneLoader` — reader chain (load monitor, `OsgReader`, vsgXchange), OSG plugin discovery
   - `OsgReader` — reads .ive/.osgb/.osgt/.osg with osgDB, normalises byte colour arrays, converts via osg2vsg
   - `SceneBounds`, `CameraFraming` — geometry bounds and camera placement math
@@ -94,9 +125,10 @@ drawn and LOD-selected as if viewed from zoom 9.5.
   - `FileDialog` — native file picker (nativefiledialog-extended, portal backend) + `AsyncFileDialog`
   - `AsyncLayerLoader` — worker-thread read/convert/compile of layers, merged by the viewer between frames
   - `MapNavigation` — Web Mercator zoom levels, pan/zoom arithmetic, `MapNavigationHandler`
+  - `GlobeNavigation` — `GlobeCamera` (lon/lat/altitude/heading/tilt), ray-ellipsoid picking, spin/zoom arithmetic, `GlobeNavigationHandler`
   - `TileScheme` — OGC WebMercatorQuad tile matrix set maths (extents, resolutions, scale denominators)
   - `TileSetBuilder` — GDAL + OSG tiler behind `tools/ivetiler`
-  - `ViewerApp` — window, camera, event handlers, frame loop (`Map` or `Trackball` navigation)
+  - `ViewerApp` — window, camera, event handlers, frame loop (`Map`, `Globe` or `Trackball` navigation)
 - `app/main.cpp` — thin command line viewer
 - `tools/ivetiler/` — tile pyramid generator
 - `tests/` — Google Test suite (`ctest` in the build directory, or CLion's test runner)

@@ -4,8 +4,16 @@
 //
 // Usage:
 //   ive_poc [scene files ...] [--layer FILE ...] [--base-tiles <tiles/root.ive>] [--base <image>] [--no-base]
-//           [--trackball] [--debug|-d] [--frames N] [--zoom Z] [--center LON LAT] [--max-zoom Z]
-//           [--min-zoom Z] [--log-loads] [--no-ui]
+//           [--projection mercator|globe] [--source-crs EPSG:xxxx] [--trackball] [--debug|-d] [--frames N]
+//           [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--log-loads] [--no-ui]
+//
+// --projection picks the frame everything is displayed in: the flat Web Mercator map (default) or the
+// WGS84 globe (EPSG:4978). On the globe, dragging spins it about its axis the way a desk globe turns
+// (longitude from sideways motion, latitude from vertical, north always up), the wheel zooms about the
+// cursor, middle-drag tilts and turns the view, N restores north-up. --trackball swaps either
+// projection's navigation for VSG's free orbit. Every OSG file is reprojected on load from its own CRS
+// (a VPB CoordinateSystemNode, else --source-crs, default EPSG:3857) into that frame, paged tiles
+// included, so the same .ive databases work in either projection.
 //
 // Every scene file becomes a layer above the base map (the first one frames the start view); --layer
 // files are added after start-up through the runtime path the panel's "Add layer" button also uses;
@@ -28,6 +36,7 @@
 // The heavy lifting lives in the ivevsg library (lib/), which is what the Google Test suite exercises.
 
 #include <ivevsg/BaseMap.h>
+#include <ivevsg/GeocentricProjection.h>
 #include <ivevsg/Hud.h>
 #include <ivevsg/MapScene.h>
 #include <ivevsg/MercatorProjection.h>
@@ -56,8 +65,22 @@ int main(int argc, char** argv)
     ivevsg::ViewerSettings settings;
     settings.debugLayer = arguments.read({"--debug", "-d"});
     settings.maxFrames = arguments.value(-1, "--frames");
-    settings.framingElevationDegrees = arguments.value(45.0, "--elevation");
-    settings.navigation = arguments.read("--trackball") ? ivevsg::NavigationMode::Trackball : ivevsg::NavigationMode::Map;
+    const std::string projectionName = arguments.value(std::string("mercator"), "--projection");
+    auto projection = ivevsg::createProjection(projectionName);
+    if (!projection)
+    {
+        std::cerr << "unknown --projection '" << projectionName << "' (use mercator or globe)\n";
+        return 1;
+    }
+    // the globe starts straight down (north up) like the map; --elevation tilts the start view
+    settings.framingElevationDegrees = arguments.value(projection->geocentric() ? 90.0 : 45.0, "--elevation");
+    const std::string sourceCrs = arguments.value(std::string("EPSG:3857"), "--source-crs");
+    // flat map navigation on a flat projection, desk-globe navigation on the globe; --trackball
+    // swaps either for VSG's free orbit
+    if (arguments.read("--trackball"))
+        settings.navigation = ivevsg::NavigationMode::Trackball;
+    else
+        settings.navigation = projection->geocentric() ? ivevsg::NavigationMode::Globe : ivevsg::NavigationMode::Map;
     settings.ui = !arguments.read("--no-ui");
 
     ivevsg::BaseMapSettings baseMapSettings;
@@ -94,6 +117,9 @@ int main(int argc, char** argv)
 
     ivevsg::LoaderSettings loaderSettings = ivevsg::SceneLoader::defaultSettings();
     loaderSettings.logReads = logLoads;
+    loaderSettings.targetCrs = projection->crs();
+    loaderSettings.defaultSourceCrs = sourceCrs;
+    loaderSettings.quadTessellation = projection->geocentric() ? 8 : 1; // bend single-quad tiles over the globe
     auto loader = std::make_shared<ivevsg::SceneLoader>(loaderSettings);
     std::cout << "vsgXchange OSG support: " << (ivevsg::SceneLoader::supportsOsg() ? "ON" : "OFF")
               << "  (OSG plugins: " << loader->settings().osgPluginDirectory << ")\n";
@@ -114,7 +140,7 @@ int main(int argc, char** argv)
         std::cout << "Layer: " << filename << "\n";
     }
 
-    auto projection = std::make_shared<ivevsg::MercatorProjection>();
+    std::cout << "Projection: " << projection->name() << " (data reprojected from " << sourceCrs << " where no CRS is recorded)\n";
 
     // Base layer: a paged tile pyramid when given, else the single Blue Marble image. It hangs under an
     // "underlay" transform that the viewer keeps a small, altitude-scaled distance below the data plane
@@ -131,6 +157,10 @@ int main(int argc, char** argv)
         underlay = vsg::MatrixTransform::create();
         underlay->addChild(tiles.node);
         std::cout << "Base map: tile pyramid " << baseTiles << (defaultTiles ? " (default)" : "") << "\n";
+    }
+    else if (!noBaseMap && projection->geocentric())
+    {
+        std::cout << "Base map: none (the single-image base is a flat quad; use a tile pyramid on the globe)\n";
     }
     else if (!noBaseMap)
     {
@@ -200,8 +230,7 @@ int main(int argc, char** argv)
     }
 
     const ivevsg::GeoExtent extent = projection->extentOf(app.sceneBounds());
-    std::cout << "Projection: " << projection->name() << "\n"
-              << "Data extent: lon [" << extent.minLongitude << ", " << extent.maxLongitude << "]"
+    std::cout << "Data extent: lon [" << extent.minLongitude << ", " << extent.maxLongitude << "]"
               << " lat [" << extent.minLatitude << ", " << extent.maxLatitude << "]\n";
     if (settings.navigation == ivevsg::NavigationMode::Map)
     {
@@ -228,6 +257,31 @@ int main(int argc, char** argv)
                   << " (past the deepest tiles the deepest tiles are simply magnified)\n"
                   << "Start zoom level: " << app.zoomLevel() << "\n"
                   << "Controls: drag = pan, wheel = zoom at cursor, arrows = pan, +/- = zoom, Home/Space = reset, Esc = quit\n";
+    }
+    else if (settings.navigation == ivevsg::NavigationMode::Globe && app.globeNavigation())
+    {
+        auto navigation = app.globeNavigation();
+        navigation->setZoomLevelRange(minZoom, maxZoom);
+        if (haveCenter || startZoom >= 0.0)
+        {
+            ivevsg::GlobeCamera camera = navigation->globeCamera();
+            if (haveCenter)
+            {
+                camera.longitude = centerLongitude;
+                camera.latitude = centerLatitude;
+            }
+            if (startZoom >= 0.0)
+            {
+                camera.altitude = ivevsg::altitudeForZoomLevel(startZoom, navigation->settings().fieldOfViewDegrees,
+                                                               navigation->viewportHeight(), navigation->settings().worldWidthMetres);
+            }
+            navigation->setGlobeCamera(camera);
+            navigation->setHome(navigation->globeCamera());
+        }
+        std::cout << "Zoom range: " << navigation->minZoomLevel() << " .. " << navigation->maxZoomLevel() << "\n"
+                  << "Start zoom level: " << app.zoomLevel() << "\n"
+                  << "Controls: drag = spin the globe about its axis, wheel = zoom at cursor, middle drag = tilt / turn,\n"
+                  << "          right drag = zoom, arrows = spin, +/- = zoom, PgUp/PgDn = tilt, N = north up, Home/Space = reset, Esc = quit\n";
     }
 
     return app.run();

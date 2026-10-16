@@ -12,12 +12,16 @@ add_library(ivevsg
     src/AsyncLayerLoader.cpp
     src/BaseMap.cpp
     src/CameraFraming.cpp
+    src/CrsTransform.cpp
     src/FileDialog.cpp
+    src/GeocentricProjection.cpp
+    src/GlobeNavigation.cpp
     src/Hud.cpp
     src/MapNavigation.cpp
     src/MapScene.cpp
     src/MercatorProjection.cpp
     src/OsgReader.cpp
+    src/OsgReproject.cpp
     src/Projection.cpp
     src/SceneBounds.cpp
     src/SceneLoader.cpp
@@ -32,6 +36,11 @@ target_link_libraries(ivevsg PUBLIC vsg::vsg vsgXchange::vsgXchange)
 target_compile_features(ivevsg PUBLIC cxx_std_17)
 target_compile_definitions(ivevsg PRIVATE
     "IVEVSG_OSG_PLUGIN_DIR=\"$<IF:$<CONFIG:Debug>,${_osg_plugins_debug},${_osg_plugins_release}>\"")
+# PROJ (proj.db) and GDAL data folders from the vcpkg tree, used only when PROJ_DATA / GDAL_DATA are
+# not set in the environment (they are exported globally on this machine; CLion may not inherit them).
+target_compile_definitions(ivevsg PRIVATE
+    "IVEVSG_PROJ_DATA_DIR=\"${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/proj\""
+    "IVEVSG_GDAL_DATA_DIR=\"${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/gdal\"")
 # Default base map image (see data/README.md); the app can override it with --base.
 target_compile_definitions(ivevsg PRIVATE "IVEVSG_DATA_DIR=\"${PROJECT_SOURCE_DIR}/data\"")
 

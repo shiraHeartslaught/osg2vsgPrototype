@@ -14,6 +14,7 @@ namespace ivevsg
         static constexpr double kMaxExtent = 20037508.342789244; // metres, pi * kEarthRadius
 
         std::string name() const override { return "EPSG:3857 WGS84 Pseudo-Mercator"; }
+        std::string crs() const override { return "EPSG:3857"; }
 
         vsg::dvec3 geoToWorld(const GeoPoint& geo) const override;
         GeoPoint worldToGeo(const vsg::dvec3& world) const override;

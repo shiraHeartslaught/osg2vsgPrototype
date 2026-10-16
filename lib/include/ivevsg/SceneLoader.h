@@ -22,6 +22,15 @@ namespace ivevsg
 
         /// Print every file read through these options (including tiles paged in at runtime) to stdout.
         bool logReads = false;
+
+        /// CRS of the frame scenes are displayed in (the current Projection's crs()). OSG files whose
+        /// own CRS differs are reprojected on load, paged tiles included. Empty disables reprojection.
+        std::string targetCrs = "EPSG:3857";
+        /// Assumed CRS of OSG files that carry no CoordinateSystemNode and were loaded without an
+        /// explicit source CRS (this project's VPB and ivetiler databases are Web Mercator).
+        std::string defaultSourceCrs = "EPSG:3857";
+        /// Grid size single-quad tiles are split into before reprojection (1 = leave as quads).
+        int quadTessellation = 1;
     };
 
     /// What the loader (and the database pager, through the shared options) has read so far.
@@ -59,7 +68,8 @@ namespace ivevsg
         /// the directory is empty, already registered, or OSG_LIBRARY_PATH is set by the user.
         static void registerOsgPluginDirectory(const std::string& directory);
 
-        LoadResult load(const std::string& filename) const;
+        /// sourceCrs overrides the CRS the file is assumed to be in (see LoaderSettings::defaultSourceCrs).
+        LoadResult load(const std::string& filename, const std::string& sourceCrs = {}) const;
 
         vsg::ref_ptr<vsg::Options> options() const { return _options; }
         const LoaderSettings& settings() const { return _settings; }

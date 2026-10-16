@@ -101,8 +101,11 @@ namespace ivevsg
         _options = vsg::Options::create();
         _monitor = LoadMonitor::create(_settings.logReads);
         _options->add(_monitor);
-        _options->add(OsgReader::create());      // our OSG reader first: fix-ups before osg2vsg conversion
+        _options->add(OsgReader::create());      // our OSG reader first: fix-ups + reprojection before osg2vsg conversion
         _options->add(vsgXchange::all::create()); // everything else (images, glTF, ...)
+        _options->setValue(OsgReader::kTargetCrs, _settings.targetCrs);
+        _options->setValue(OsgReader::kDefaultSourceCrs, _settings.defaultSourceCrs);
+        _options->setValue(OsgReader::kQuadTessellation, _settings.quadTessellation);
         _options->paths = vsg::getEnvPaths("VSG_FILE_PATH");
         for (const auto& path : _settings.searchPaths) _options->paths.push_back(vsg::Path(path));
     }
@@ -114,7 +117,7 @@ namespace ivevsg
         return _monitor ? _monitor->stats() : LoadStats{};
     }
 
-    LoadResult SceneLoader::load(const std::string& filename) const
+    LoadResult SceneLoader::load(const std::string& filename, const std::string& sourceCrs) const
     {
         LoadResult result;
 
@@ -132,6 +135,7 @@ namespace ivevsg
         auto options = vsg::Options::create(*_options);
         const vsg::Path directory = vsg::filePath(found);
         if (!directory.empty()) options->paths.push_back(directory);
+        if (!sourceCrs.empty()) options->setValue(OsgReader::kSourceCrs, sourceCrs);
         result.node = vsg::read_cast<vsg::Node>(found, options);
         if (!result.node)
         {

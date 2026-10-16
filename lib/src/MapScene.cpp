@@ -57,7 +57,12 @@ namespace ivevsg
 
     void LayerStack::setLayerHeight(std::size_t index, double z)
     {
-        if (index < _layers.size()) _layers[index].placement->matrix = vsg::translate(0.0, 0.0, z);
+        setLayerOffset(index, vsg::translate(0.0, 0.0, z));
+    }
+
+    void LayerStack::setLayerOffset(std::size_t index, const vsg::dmat4& transform)
+    {
+        if (index < _layers.size()) _layers[index].placement->matrix = transform;
     }
 
     bool LayerStack::removeLayer(std::size_t index)

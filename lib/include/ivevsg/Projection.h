@@ -1,8 +1,10 @@
 #pragma once
 
 #include <vsg/maths/box.h>
+#include <vsg/maths/mat4.h>
 #include <vsg/maths/vec3.h>
 
+#include <memory>
 #include <string>
 
 namespace ivevsg
@@ -45,6 +47,17 @@ namespace ivevsg
 
         virtual std::string name() const = 0;
 
+        /// Coordinate reference system of the world frame, as a GDAL/OGR user input such as "EPSG:3857"
+        /// or "EPSG:4978". Loaded data whose source CRS differs is reprojected into this frame.
+        virtual std::string crs() const = 0;
+
+        /// True for whole-earth (ECEF) frames, where "down" is radial rather than -z.
+        virtual bool geocentric() const { return false; }
+
+        /// Transform that moves a layer `offsetMetres` above (positive) or below (negative) the data
+        /// surface everywhere: a z translation on a flat map, a radial scale on a globe.
+        virtual vsg::dmat4 layerOffsetTransform(double offsetMetres) const;
+
         virtual vsg::dvec3 geoToWorld(const GeoPoint& geo) const = 0;
         virtual GeoPoint worldToGeo(const vsg::dvec3& world) const = 0;
 
@@ -66,4 +79,8 @@ namespace ivevsg
         /// Geographic extent covered by a world-space bounding box.
         GeoExtent extentOf(const vsg::dbox& bounds) const;
     };
+
+    /// The projection for a CRS string: "EPSG:3857" (or "mercator") -> MercatorProjection,
+    /// "EPSG:4978" (or "globe", "geocentric") -> GeocentricProjection, else nullptr.
+    std::shared_ptr<Projection> createProjection(const std::string& crsOrName);
 } // namespace ivevsg

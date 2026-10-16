@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ivevsg/AsyncLayerLoader.h>
+#include <ivevsg/GlobeNavigation.h>
 #include <ivevsg/MapNavigation.h>
 #include <ivevsg/MapScene.h>
 #include <ivevsg/Projection.h>
@@ -30,6 +31,7 @@ namespace ivevsg
     enum class NavigationMode
     {
         Map,      ///< 2D web-map style: straight down, north up, drag to pan, wheel to zoom (MapNavigationHandler)
+        Globe,    ///< desk-globe style on a geocentric projection: drag spins the globe about its axis (GlobeNavigationHandler)
         Trackball ///< free 3D orbit with vsg::Trackball, framed from an oblique elevation
     };
 
@@ -40,9 +42,10 @@ namespace ivevsg
         uint32_t height = 1024;
         bool debugLayer = false; // enable the Vulkan validation layer
         double fieldOfViewDegrees = 30.0;
-        double framingElevationDegrees = 45.0; // Trackball mode only; Map mode always looks straight down
+        double framingElevationDegrees = 45.0; // Globe / Trackball modes; Map mode always looks straight down
         NavigationMode navigation = NavigationMode::Map;
         MapNavigationSettings mapNavigation;
+        GlobeNavigationSettings globeNavigation; // Globe mode (falls back to Trackball on a flat projection)
         bool ui = true;     // render Dear ImGui panels registered with addUi() (vsgImGui)
         int maxFrames = -1; // >= 0 stops after that many frames (smoke tests, screenshots)
     };
@@ -70,7 +73,7 @@ namespace ivevsg
         /// Looks straight down at a geographic position from the given altitude in metres.
         void lookAt(const GeoPoint& target, double altitudeMetres);
 
-        /// Web Mercator zoom level of the current view (Map mode only, 0 otherwise).
+        /// Web Mercator zoom level of the current view (Map and Globe modes, 0 in Trackball mode).
         double zoomLevel() const;
 
         /// Called from frame() whenever the map camera has changed (Map mode only).
@@ -120,6 +123,7 @@ namespace ivevsg
         vsg::ref_ptr<vsg::Window> window() const { return _window; }
         vsg::ref_ptr<vsg::Camera> camera() const { return _camera; }
         vsg::ref_ptr<MapNavigationHandler> mapNavigation() const { return _mapNavigation; }
+        vsg::ref_ptr<GlobeNavigationHandler> globeNavigation() const { return _globeNavigation; }
         vsg::ref_ptr<vsg::Node> scene() const { return _scene; }
         const vsg::dbox& sceneBounds() const { return _bounds; }
         int frameCount() const { return _frameCount; }
@@ -137,6 +141,7 @@ namespace ivevsg
         vsg::ref_ptr<vsg::LookAt> _lookAt;
         vsg::ref_ptr<vsg::Perspective> _perspective;
         vsg::ref_ptr<MapNavigationHandler> _mapNavigation;
+        vsg::ref_ptr<GlobeNavigationHandler> _globeNavigation;
         vsg::ref_ptr<vsgImGui::RenderImGui> _imgui;
         std::vector<std::function<bool()>> _pendingPanels;
         std::shared_ptr<LayerStack> _layers;

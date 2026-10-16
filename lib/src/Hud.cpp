@@ -1,5 +1,6 @@
 #include <ivevsg/FileDialog.h>
 #include <ivevsg/Hud.h>
+#include <ivevsg/GlobeNavigation.h>
 #include <ivevsg/MapNavigation.h>
 #include <ivevsg/MercatorProjection.h>
 #include <ivevsg/SceneLoader.h>
@@ -107,6 +108,86 @@ namespace ivevsg
                 {
                     navigation->setZoomLevelRange(navigation->minZoomLevel(), state->maxZoom);
                 }
+            }
+            else if (context.app && context.projection && context.app->globeNavigation())
+            {
+                vsg::ref_ptr<GlobeNavigationHandler> globe = context.app->globeNavigation();
+                const GlobeNavigationSettings& nav = globe->settings();
+                const GlobeCamera camera = globe->globeCamera();
+                const double viewportWidth = globe->viewportWidth();
+                const double viewportHeight = globe->viewportHeight();
+                const double zoom = globe->zoomLevel();
+                const double mpp = metersPerPixel(camera.altitude, nav.fieldOfViewDegrees, viewportHeight);
+
+                if (!state->initialised)
+                {
+                    state->longitude = camera.longitude;
+                    state->latitude = camera.latitude;
+                    state->zoom = zoom;
+                    state->maxZoom = globe->maxZoomLevel();
+                    state->initialised = true;
+                }
+
+                ImGui::Text("%s", context.projection->name().c_str());
+                ImGui::Text("Zoom %.2f   %.1f m/px", zoom, mpp);
+                ImGui::Text("OGC tile level %.2f   altitude %.0f m", context.scheme.levelForMetersPerPixel(mpp), camera.altitude);
+                ImGui::Text("Centre  lon %9.4f  lat %8.4f", camera.longitude, camera.latitude);
+                ImGui::Text("Heading %6.1f   tilt %5.1f", camera.heading, camera.tilt);
+                const GlobeNavigationHandler::PointerPosition pointer = globe->lastPointer();
+                GeoPoint cursor;
+                if (pointer.valid && globePointAtPixel(camera, pointer.x, pointer.y, viewportWidth, viewportHeight, nav, *context.projection, cursor))
+                    ImGui::Text("Cursor  lon %9.4f  lat %8.4f", cursor.longitude, cursor.latitude);
+                else if (pointer.valid)
+                    ImGui::Text("Cursor  (off the globe)");
+                else
+                    ImGui::Text("Cursor  (move the mouse over the globe)");
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Go to");
+                ImGui::InputDouble("Longitude", &state->longitude, 0.1, 1.0, "%.4f");
+                ImGui::InputDouble("Latitude", &state->latitude, 0.1, 1.0, "%.4f");
+                const double minZoom = globe->minZoomLevel();
+                const double maxZoom = globe->maxZoomLevel();
+                ImGui::SliderScalar("Zoom level", ImGuiDataType_Double, &state->zoom, &minZoom, &maxZoom, "%.2f");
+                if (ImGui::Button("Go"))
+                {
+                    state->latitude = std::clamp(state->latitude, -nav.maxLatitude, nav.maxLatitude);
+                    const double altitude = altitudeForZoomLevel(state->zoom, nav.fieldOfViewDegrees, viewportHeight, nav.worldWidthMetres);
+                    context.app->lookAt(GeoPoint{state->longitude, state->latitude, 0.0}, altitude);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Home")) context.app->frameScene();
+                ImGui::SameLine();
+                if (ImGui::Button("North up")) globe->northUp();
+                ImGui::SameLine();
+                if (ImGui::Button("Use current view"))
+                {
+                    state->longitude = camera.longitude;
+                    state->latitude = camera.latitude;
+                    state->zoom = zoom;
+                }
+
+                const double zoomFloor = 0.0, zoomCeiling = 28.0;
+                if (ImGui::SliderScalar("Max zoom", ImGuiDataType_Double, &state->maxZoom, &zoomFloor, &zoomCeiling, "%.0f"))
+                {
+                    globe->setZoomLevelRange(globe->minZoomLevel(), state->maxZoom);
+                }
+                ImGui::TextDisabled("Drag = spin the globe, wheel = zoom at cursor");
+                ImGui::TextDisabled("Middle drag = tilt / turn, right drag = zoom");
+                ImGui::TextDisabled("PgUp/PgDn = tilt, N = north up, Home = start view");
+            }
+            else if (context.app && context.projection && context.app->camera())
+            {
+                ImGui::Text("%s", context.projection->name().c_str());
+                if (auto lookAt = context.app->camera()->viewMatrix.cast<vsg::LookAt>())
+                {
+                    const GeoPoint eye = context.projection->worldToGeo(lookAt->eye);
+                    const GeoPoint target = context.projection->worldToGeo(lookAt->center);
+                    ImGui::Text("Eye     lon %9.4f  lat %8.4f  alt %.0f m", eye.longitude, eye.latitude, eye.altitude);
+                    ImGui::Text("Target  lon %9.4f  lat %8.4f", target.longitude, target.latitude);
+                }
+                ImGui::TextDisabled("Trackball: drag = orbit, right drag / wheel = zoom, middle = pan");
+                if (ImGui::Button("Home")) context.app->frameScene();
             }
             else
             {

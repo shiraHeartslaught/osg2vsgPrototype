@@ -7,7 +7,10 @@ add_executable(ivevsg_tests
     test_map_scene.cpp
     test_mercator_projection.cpp
     test_osg_reader.cpp
+    test_reproject.cpp
     test_camera_framing.cpp
+    test_geocentric.cpp
+    test_globe_navigation.cpp
     test_scene_bounds.cpp
     test_scene_loader.cpp
     test_tile_scheme.cpp

@@ -44,10 +44,12 @@ namespace ivevsg
         void setLayerVisible(std::size_t index, bool visible);
         bool layerVisible(std::size_t index) const;
 
-        /// Lifts a layer above the data plane. Layers that overlap on the same plane would z-fight;
-        /// ViewerApp raises layer i by i * a small fraction of the camera altitude every frame, so
-        /// later layers draw on top without changing what they look like.
+        /// Lifts a layer above the data surface by a z translation (flat maps). Layers that overlap on
+        /// the same surface would z-fight; ViewerApp raises layer i by i * a small fraction of the
+        /// camera altitude every frame, so later layers draw on top without changing what they look like.
         void setLayerHeight(std::size_t index, double z);
+        /// Same, with an arbitrary transform (e.g. a radial scale on a globe, see Projection::layerOffsetTransform).
+        void setLayerOffset(std::size_t index, const vsg::dmat4& transform);
 
     private:
         std::size_t switchIndex(std::size_t layer) const { return (_base ? 1 : 0) + layer; }

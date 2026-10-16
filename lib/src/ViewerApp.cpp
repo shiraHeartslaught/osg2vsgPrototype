@@ -95,6 +95,15 @@ namespace ivevsg
                 _mapNavigation = MapNavigationHandler::create(_camera, navigation); // drag pan, wheel zoom
                 _viewer->addEventHandler(_mapNavigation);
             }
+            else if (_settings.navigation == NavigationMode::Globe && _projection->geocentric())
+            {
+                _globeNavigation = GlobeNavigationHandler::create(_camera, _projection, _settings.globeNavigation); // drag spins the globe
+                _viewer->addEventHandler(_globeNavigation);
+            }
+            else if (_projection->geocentric())
+            {
+                _viewer->addEventHandler(vsg::Trackball::create(_camera, vsg::EllipsoidModel::create())); // orbit about the look-at point
+            }
             else
             {
                 _viewer->addEventHandler(vsg::Trackball::create(_camera)); // LMB orbit, RMB zoom, MMB pan
@@ -173,6 +182,12 @@ namespace ivevsg
             _mapNavigation->setMapCamera(MapCamera{{pose.centre.x, pose.centre.y}, pose.eye.z - _mapNavigation->settings().groundHeight});
             return;
         }
+        if (_globeNavigation)
+        {
+            const CameraPose pose = _projection->framingPose(bounds, _settings.framingElevationDegrees);
+            _globeNavigation->setGlobeCamera(globeCameraFromLookAt(pose.eye, pose.centre, pose.up, *_projection));
+            return;
+        }
         applyPose(_projection->framingPose(bounds, _settings.framingElevationDegrees));
     }
 
@@ -199,12 +214,19 @@ namespace ivevsg
             _mapNavigation->home();
             return;
         }
+        if (_globeNavigation)
+        {
+            _globeNavigation->home();
+            return;
+        }
         applyPose(_projection->framingPose(_bounds, _settings.framingElevationDegrees));
     }
 
     double ViewerApp::zoomLevel() const
     {
-        return _mapNavigation ? _mapNavigation->zoomLevel() : 0.0;
+        if (_mapNavigation) return _mapNavigation->zoomLevel();
+        if (_globeNavigation) return _globeNavigation->zoomLevel();
+        return 0.0;
     }
 
     void ViewerApp::lookAt(const GeoPoint& target, double altitudeMetres)
@@ -215,13 +237,25 @@ namespace ivevsg
             _mapNavigation->setMapCamera(MapCamera{{centre.x, centre.y}, altitudeMetres});
             return;
         }
+        if (_globeNavigation)
+        {
+            GlobeCamera camera;
+            camera.longitude = target.longitude;
+            camera.latitude = target.latitude;
+            camera.altitude = altitudeMetres;
+            _globeNavigation->setGlobeCamera(camera); // straight down, north up
+            return;
+        }
         const vsg::dvec3 up = _projection->upVector(centre);
 
         CameraPose pose;
         pose.centre = centre;
         pose.eye = centre + up * altitudeMetres;
-        // Looking along -up, so the screen "up" must be perpendicular to it: prefer north, else east.
-        pose.up = (std::abs(up.y) < 0.99) ? vsg::dvec3(0.0, 1.0, 0.0) : vsg::dvec3(1.0, 0.0, 0.0);
+        // Looking along -up, so the screen "up" must be perpendicular to it: north on a map, the
+        // earth's axis (projected) on a globe, east when that degenerates.
+        vsg::dvec3 screenUp = _projection->geocentric() ? vsg::dvec3(0.0, 0.0, 1.0) : vsg::dvec3(0.0, 1.0, 0.0);
+        screenUp = screenUp - up * vsg::dot(screenUp, up);
+        pose.up = (vsg::length(screenUp) > 1e-6) ? vsg::normalize(screenUp) : vsg::dvec3(1.0, 0.0, 0.0);
         pose.nearPlane = std::max(1.0, altitudeMetres * 0.0005);
         pose.farPlane = altitudeMetres * 10.0 + summarize(_bounds).radius;
         applyPose(pose);
@@ -268,14 +302,16 @@ namespace ivevsg
         {
             double altitude = 1.0;
             if (_mapNavigation) altitude = _mapNavigation->mapCamera().altitude;
-            else if (_lookAt) altitude = std::abs(_lookAt->eye.z);
-            // keep the underlay a fixed fraction of the eye height below the data plane ...
-            if (_underlay) _underlay->matrix = vsg::translate(0.0, 0.0, -std::max(1.0, altitude * _underlayDepthFraction));
+            else if (_globeNavigation) altitude = _globeNavigation->globeCamera().altitude;
+            else if (_lookAt && _projection) altitude = std::max(1.0, _projection->worldToGeo(_lookAt->eye).altitude);
+            // keep the underlay a fixed fraction of the eye height below the data surface (z on a map,
+            // radially on a globe) ...
+            if (_underlay && _projection) _underlay->matrix = _projection->layerOffsetTransform(-std::max(1.0, altitude * _underlayDepthFraction));
             // ... and each further data layer a little above the previous one, so overlaps never z-fight
-            if (_layers)
+            if (_layers && _projection)
             {
                 for (std::size_t i = 1; i < _layers->layerCount(); ++i)
-                    _layers->setLayerHeight(i, std::max(0.5, altitude * layerSeparationFraction) * static_cast<double>(i));
+                    _layers->setLayerOffset(i, _projection->layerOffsetTransform(std::max(0.5, altitude * layerSeparationFraction) * static_cast<double>(i)));
             }
         }
         if (_mapNavigation && onMapViewChanged)

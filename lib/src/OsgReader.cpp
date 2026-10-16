@@ -1,6 +1,8 @@
 #include <ivevsg/OsgReader.h>
+#include <ivevsg/OsgReproject.h>
 
 #include <osg/Array>
+#include <osg/CoordinateSystemNode>
 #include <osg/Geometry>
 #include <osg/NodeVisitor>
 #include <osgDB/Options>
@@ -37,6 +39,20 @@ namespace ivevsg
             return floats;
         }
 
+        /// First osg::CoordinateSystemNode in the scene (VPB writes one at a database root).
+        class FindCoordinateSystem : public osg::NodeVisitor
+        {
+        public:
+            FindCoordinateSystem() :
+                osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN) {}
+            std::string crs;
+            void apply(osg::CoordinateSystemNode& csn) override
+            {
+                if (crs.empty()) crs = csn.getCoordinateSystem();
+                traverse(csn);
+            }
+        };
+
         class ByteColourNormaliser : public osg::NodeVisitor
         {
         public:
@@ -70,6 +86,11 @@ namespace ivevsg
         return visitor.rewritten;
     }
 
+    const char* const OsgReader::kTargetCrs = "ivevsg.target_crs";
+    const char* const OsgReader::kSourceCrs = "ivevsg.source_crs";
+    const char* const OsgReader::kDefaultSourceCrs = "ivevsg.default_source_crs";
+    const char* const OsgReader::kQuadTessellation = "ivevsg.quad_tessellation";
+
     OsgReader::OsgReader() = default;
 
     bool OsgReader::handles(const vsg::Path& filename)
@@ -102,6 +123,42 @@ namespace ivevsg
         osg::ref_ptr<osg::Node> scene = result.takeNode();
 
         normaliseByteColourArrays(*scene);
+
+        // Reproject into the current projection's frame when the options ask for it. The source CRS
+        // comes from the load request, else from the file's CoordinateSystemNode, else from the
+        // loader's default. The values travel with the options into every PagedLOD child, so paged
+        // tiles are reprojected the same way as their root.
+        std::string targetCrs;
+        if (options && options->getValue(OsgReader::kTargetCrs, targetCrs) && !targetCrs.empty())
+        {
+            std::string sourceCrs;
+            options->getValue(OsgReader::kSourceCrs, sourceCrs);
+            if (sourceCrs.empty())
+            {
+                FindCoordinateSystem finder;
+                scene->accept(finder);
+                sourceCrs = finder.crs;
+            }
+            if (sourceCrs.empty()) options->getValue(OsgReader::kDefaultSourceCrs, sourceCrs);
+
+            ReprojectSettings settings;
+            settings.sourceCrs = sourceCrs;
+            settings.target = createProjection(targetCrs);
+            options->getValue(OsgReader::kQuadTessellation, settings.quadTessellation);
+            if (!settings.target)
+            {
+                vsg::warn("OsgReader: unknown target projection '", targetCrs, "', leaving ", filename, " unprojected");
+            }
+            else if (sourceCrs.empty())
+            {
+                vsg::warn("OsgReader: no source CRS known for ", filename, ", leaving it unprojected");
+            }
+            else
+            {
+                const ReprojectReport report = reprojectScene(*scene, settings);
+                if (!report) vsg::warn("OsgReader: reprojection of ", filename, " failed: ", report.error);
+            }
+        }
 
         return osg2vsg::convert(*scene, options);
     }

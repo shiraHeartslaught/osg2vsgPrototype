@@ -20,13 +20,20 @@ namespace ivevsg
     std::size_t normaliseByteColourArrays(osg::Node& scene);
 
     /// Reads OpenSceneGraph scene formats (.ive, .osgb, .osgt, .osg) with osgDB, applies the fix-ups
-    /// above, and converts the result with osg2vsg. SceneLoader puts it ahead of vsgXchange, so these
-    /// adjustments live here instead of as patches to third-party code. Anything it does not handle
-    /// (other extensions, images) is declined and falls through to the next reader.
+    /// above, optionally reprojects the scene into the current projection (see the option values
+    /// below), and converts the result with osg2vsg. SceneLoader puts it ahead of vsgXchange, so
+    /// these adjustments live here instead of as patches to third-party code. Anything it does not
+    /// handle (other extensions, images) is declined and falls through to the next reader.
     class OsgReader : public vsg::Inherit<vsg::ReaderWriter, OsgReader>
     {
     public:
         OsgReader();
+
+        /// vsg::Options string/int values that control reprojection (set by SceneLoader):
+        static const char* const kTargetCrs;        // e.g. "EPSG:3857" or "EPSG:4978"; empty = no reprojection
+        static const char* const kSourceCrs;        // per-load override of the file's CRS
+        static const char* const kDefaultSourceCrs; // used when the file has no CoordinateSystemNode
+        static const char* const kQuadTessellation; // int, see ReprojectSettings
 
         static bool handles(const vsg::Path& filename);
 
