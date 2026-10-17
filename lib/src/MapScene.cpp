@@ -48,11 +48,27 @@ namespace ivevsg
 
     std::size_t LayerStack::addLayer(const std::string& name, vsg::ref_ptr<vsg::Node> node)
     {
-        auto placement = vsg::MatrixTransform::create();
-        placement->addChild(node);
-        _layers.push_back(Layer{name, node, placement});
-        _switch->addChild(true, placement);
+        Layer layer;
+        layer.name = name;
+        layer.node = node;
+        return addLayer(std::move(layer));
+    }
+
+    std::size_t LayerStack::addLayer(Layer layer)
+    {
+        layer.placement = vsg::MatrixTransform::create();
+        if (layer.node) layer.placement->addChild(layer.node);
+        if (layer.source.name.empty()) layer.source.name = layer.name;
+        _switch->addChild(true, layer.placement);
+        _layers.push_back(std::move(layer));
         return _layers.size() - 1;
+    }
+
+    std::vector<LayerSource> LayerStack::sources() const
+    {
+        std::vector<LayerSource> result;
+        for (const Layer& layer : _layers) result.push_back(layer.source);
+        return result;
     }
 
     void LayerStack::setLayerHeight(std::size_t index, double z)

@@ -119,4 +119,16 @@ namespace ivevsg
         out.altitude = tz;
         return true;
     }
+    std::string CrsTransform::displayName(const std::string& crs)
+    {
+        if (crs.empty()) return crs;
+        ensureGisDataPaths();
+        OGRSpatialReference srs;
+        if (srs.SetFromUserInput(crs.c_str()) != OGRERR_NONE) return crs;
+        const char* authority = srs.GetAuthorityName(nullptr);
+        const char* code = srs.GetAuthorityCode(nullptr);
+        if (authority && code) return std::string(authority) + ":" + code;
+        const char* name = srs.GetName();
+        return name ? std::string(name) : crs;
+    }
 } // namespace ivevsg

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <vector>
 
 namespace ivevsg
@@ -19,11 +20,12 @@ namespace ivevsg
         class Reprojector : public osg::NodeVisitor
         {
         public:
-            Reprojector(const CrsTransform& crs, const Projection& target, int quadTessellation) :
+            Reprojector(const CrsTransform& crs, const Projection& target, int quadTessellation, std::optional<double> referenceLongitude) :
                 osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN),
                 _crs(crs),
                 _target(target),
-                _tessellation(std::max(1, quadTessellation))
+                _tessellation(std::max(1, quadTessellation)),
+                _referenceLongitude(referenceLongitude)
             {
                 _frames.push_back(Frame{osg::Matrixd::identity(), osg::Vec3d()});
             }
@@ -63,15 +65,28 @@ namespace ivevsg
                 const double scale = localScale(oldWorld, newWorld, std::max(oldRadius, 1.0));
 
                 lod.setCenterMode(osg::LOD::USER_DEFINED_CENTER);
-                lod.setCenter(newWorld - frame.newOrigin);
-                if (oldRadius > 0.0) lod.setRadius(oldRadius * scale);
+                const osg::Vec3d newCentre = newWorld - frame.newOrigin;
+                lod.setCenter(newCentre);
                 if (lod.getRangeMode() == osg::LOD::DISTANCE_FROM_EYE_POINT)
                 {
                     for (unsigned int i = 0; i < lod.getNumRanges(); ++i)
                         lod.setRange(i, static_cast<float>(lod.getMinRange(i) * scale), static_cast<float>(lod.getMaxRange(i) * scale));
                 }
                 ++report.lods;
-                traverse(lod);
+                traverse(lod); // the resident children are reprojected now
+
+                // The sphere must still enclose the content, or the tile is culled while part of it is
+                // on screen. The scale at the centre is only exact for a small tile: a Mercator tile
+                // reaching from 60 to 85 degrees shrinks far less at its southern edge than at its
+                // centre, so take the larger of the scaled radius and the reprojected children's bound
+                // (paged children refine the same area, so the resident ones stand in for them).
+                double radius = oldRadius > 0.0 ? oldRadius * scale : 0.0;
+                for (unsigned int i = 0; i < lod.getNumChildren(); ++i)
+                {
+                    const osg::BoundingSphere child = lod.getChild(i)->getBound();
+                    if (child.valid()) radius = std::max(radius, (osg::Vec3d(child.center()) - newCentre).length() + child.radius());
+                }
+                if (radius > 0.0) lod.setRadius(radius);
             }
 
         private:
@@ -89,6 +104,11 @@ namespace ivevsg
                     if (report.error.empty()) report.error = "coordinate transformation failed";
                     return sourceWorld;
                 }
+                // On a map that repeats sideways, keep every point of this file on the same side of the
+                // antimeridian as the file's centre: a tile straddling +-180 then stays one piece just
+                // past the map's edge (where the wrapped copy shows it) instead of being torn across the
+                // whole width when its vertices come back as +179.9 and -179.9.
+                if (_referenceLongitude) geo.longitude = *_referenceLongitude + std::remainder(geo.longitude - *_referenceLongitude, 360.0);
                 const vsg::dvec3 w = _target.geoToWorld(geo);
                 return {w.x, w.y, w.z};
             }
@@ -216,6 +236,7 @@ namespace ivevsg
             const CrsTransform& _crs;
             const Projection& _target;
             int _tessellation;
+            std::optional<double> _referenceLongitude;
             std::vector<Frame> _frames;
         };
     } // namespace
@@ -245,7 +266,15 @@ namespace ivevsg
             report.error = error;
             return report;
         }
-        Reprojector visitor(*crs, *settings.target, settings.quadTessellation);
+        std::optional<double> referenceLongitude;
+        if (settings.target->wrapWidth() > 0.0)
+        {
+            const osg::BoundingSphere bound = scene.getBound();
+            GeoPoint centre;
+            if (bound.valid() && crs->toGeographic(bound.center().x(), bound.center().y(), bound.center().z(), centre) && std::abs(centre.longitude) <= 180.0)
+                referenceLongitude = centre.longitude;
+        }
+        Reprojector visitor(*crs, *settings.target, settings.quadTessellation, referenceLongitude);
         scene.accept(visitor);
         return visitor.report;
     }

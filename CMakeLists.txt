@@ -16,7 +16,9 @@ option(IVEVSG_BUILD_TESTS "Build the Google Test suite" ON)
 set(IVEVSG_TEST_IVE "/run/media/heartslaught/games/ive_test/gadas-world.ive" CACHE FILEPATH
     "Paged .ive database used by the loader integration test (the test is skipped if it is missing)")
 set(IVEVSG_DEFAULT_TILES "/run/media/heartslaught/games/ive_test/bluemarble_tiles_l11/root.ive" CACHE FILEPATH
-    "Tile pyramid root the viewer uses as its base map by default (falls back to the single image if missing)")
+    "Web Mercator tile pyramid root the viewer uses as the map's base by default (falls back to the single image if missing)")
+set(IVEVSG_DEFAULT_GLOBE_TILES "/run/media/heartslaught/games/ive_test/bluemarble_ecef_l9/root.ive" CACHE FILEPATH
+    "Geocentric (EPSG:4978) tile pyramid root the viewer uses as the globe's base by default (ivetiler --geocentric)")
 
 find_package(vsg CONFIG REQUIRED)
 # Note the capital X: the config file is vsgXchangeConfig.cmake, and Linux is case-sensitive.

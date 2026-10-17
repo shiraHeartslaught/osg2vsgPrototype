@@ -26,24 +26,26 @@ namespace ivevsg
         }
     }
 
-    void AsyncLayerLoader::request(const std::string& path, const std::string& name)
+    void AsyncLayerLoader::request(const std::string& path, const std::string& name, const std::string& sourceCrs)
     {
         std::string layerName = name.empty() ? vsg::simpleFilename(vsg::Path(path)).string() : name;
         auto loader = _loader;
         auto compile = _compile;
+        const LayerSource source{path, layerName, sourceCrs};
 
-        auto future = std::async(std::launch::async, [loader, compile, path, layerName]() -> LayerLoadOutcome {
+        auto future = std::async(std::launch::async, [loader, compile, source]() -> LayerLoadOutcome {
             const auto start = std::chrono::steady_clock::now();
             LayerLoadOutcome outcome;
-            outcome.path = path;
-            outcome.name = layerName;
+            outcome.path = source.path;
+            outcome.name = source.name;
+            outcome.source = source;
             if (!loader)
             {
                 outcome.error = "no loader";
             }
             else
             {
-                const LoadResult loaded = loader->load(path);
+                const LoadResult loaded = loader->load(source.path, source.sourceCrs);
                 if (!loaded)
                 {
                     outcome.error = loaded.error;
@@ -51,6 +53,8 @@ namespace ivevsg
                 else
                 {
                     outcome.node = loaded.node;
+                    outcome.sourceCrs = loaded.sourceCrs;
+                    outcome.targetCrs = loaded.targetCrs;
                     if (compile)
                     {
                         try
@@ -70,7 +74,7 @@ namespace ivevsg
         });
 
         std::lock_guard<std::mutex> lock(_mutex);
-        _jobs.push_back(Job{path, layerName, std::move(future)});
+        _jobs.push_back(Job{source, std::move(future)});
     }
 
     std::vector<LayerLoadOutcome> AsyncLayerLoader::takeCompleted()
@@ -96,8 +100,16 @@ namespace ivevsg
     {
         std::vector<std::string> names;
         std::lock_guard<std::mutex> lock(_mutex);
-        for (const auto& job : _jobs) names.push_back(job.name);
+        for (const auto& job : _jobs) names.push_back(job.source.name);
         return names;
+    }
+
+    std::vector<LayerSource> AsyncLayerLoader::inFlightSources() const
+    {
+        std::vector<LayerSource> sources;
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (const auto& job : _jobs) sources.push_back(job.source);
+        return sources;
     }
 
     std::size_t AsyncLayerLoader::pendingCount() const

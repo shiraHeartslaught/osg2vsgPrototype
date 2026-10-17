@@ -16,10 +16,12 @@ add_library(ivevsg
     src/FileDialog.cpp
     src/GeocentricProjection.cpp
     src/GlobeNavigation.cpp
+    src/GlobeView.cpp
     src/Hud.cpp
     src/MapNavigation.cpp
     src/MapScene.cpp
     src/MercatorProjection.cpp
+    src/MercatorView.cpp
     src/OsgReader.cpp
     src/OsgReproject.cpp
     src/Projection.cpp
@@ -27,7 +29,9 @@ add_library(ivevsg
     src/SceneLoader.cpp
     src/TileScheme.cpp
     src/TileSetBuilder.cpp
+    src/TrackballView.cpp
     src/ViewerApp.cpp
+    src/WorldView.cpp
 )
 add_library(ivevsg::ivevsg ALIAS ivevsg)
 

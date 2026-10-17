@@ -137,6 +137,11 @@ namespace ivevsg
         if (!directory.empty()) options->paths.push_back(directory);
         if (!sourceCrs.empty()) options->setValue(OsgReader::kSourceCrs, sourceCrs);
         result.node = vsg::read_cast<vsg::Node>(found, options);
+        if (result.node)
+        {
+            result.node->getValue(OsgReader::kNodeSourceCrs, result.sourceCrs);
+            result.node->getValue(OsgReader::kNodeTargetCrs, result.targetCrs);
+        }
         if (!result.node)
         {
             result.error = "No loader could read " + filename;

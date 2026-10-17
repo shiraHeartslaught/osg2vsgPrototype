@@ -31,6 +31,10 @@ namespace ivevsg
         /// used from one thread at a time; create one per worker.
         static bool sameCrs(const std::string& a, const std::string& b);
 
+        /// A short label for a CRS given in any form: "EPSG:3857" for anything carrying an authority
+        /// code, else the CRS's own name (e.g. "WGS 84 / Pseudo-Mercator"), else the text unchanged.
+        static std::string displayName(const std::string& crs);
+
     private:
         CrsTransform() = default;
         struct Impl;

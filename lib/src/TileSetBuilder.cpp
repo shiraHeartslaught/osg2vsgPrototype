@@ -1,9 +1,12 @@
+#include <ivevsg/GeocentricProjection.h>
 #include <ivevsg/MercatorProjection.h>
 #include <ivevsg/SceneLoader.h>
 #include <ivevsg/TileSetBuilder.h>
 
 #include <gdal_priv.h>
+#include <ogr_spatialref.h>
 
+#include <osg/CoordinateSystemNode>
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/Image>
@@ -150,6 +153,17 @@ namespace ivevsg
             return image;
         }
 
+        osg::ref_ptr<osg::Texture2D> makeTexture(osg::ref_ptr<osg::Image> image)
+        {
+            osg::ref_ptr<osg::Texture2D> texture = new osg::Texture2D(image);
+            texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR_MIPMAP_LINEAR);
+            texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
+            texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+            texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+            texture->setResizeNonPowerOfTwoHint(false);
+            return texture;
+        }
+
         /// Textured quad for one tile, in local coordinates around the tile centre for float precision.
         osg::ref_ptr<osg::Node> makeTileQuad(const TileScheme& scheme, const TileIndex& tile, osg::ref_ptr<osg::Image> image)
         {
@@ -177,13 +191,7 @@ namespace ivevsg
             geometry->setColorArray(colors, osg::Array::BIND_OVERALL);
             geometry->addPrimitiveSet(new osg::DrawElementsUShort(GL_TRIANGLES, 6, std::array<GLushort, 6>{0, 1, 2, 0, 2, 3}.data()));
 
-            osg::ref_ptr<osg::Texture2D> texture = new osg::Texture2D(image);
-            texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR_MIPMAP_LINEAR);
-            texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
-            texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
-            texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
-            texture->setResizeNonPowerOfTwoHint(false);
-            geometry->getOrCreateStateSet()->setTextureAttributeAndModes(0, texture, osg::StateAttribute::ON);
+            geometry->getOrCreateStateSet()->setTextureAttributeAndModes(0, makeTexture(image), osg::StateAttribute::ON);
 
             osg::ref_ptr<osg::Geode> geode = new osg::Geode;
             geode->addDrawable(geometry);
@@ -194,19 +202,119 @@ namespace ivevsg
             return transform;
         }
 
+        /// Where a tile sits on the globe: its centre and bounding radius in EPSG:4978 metres.
+        struct GlobeTileBound
+        {
+            osg::Vec3d centre;
+            double radius = 0.0;
+        };
+
+        osg::Vec3d toEcef(const MercatorProjection& mercator, const GeocentricProjection& globe, double x, double y)
+        {
+            const vsg::dvec3 w = globe.geoToWorld(mercator.worldToGeo(vsg::dvec3(x, y, 0.0)));
+            return {w.x, w.y, w.z};
+        }
+
+        GlobeTileBound globeTileBound(const TileScheme& scheme, const TileIndex& tile, int grid)
+        {
+            const MercatorProjection mercator;
+            const GeocentricProjection globe;
+            const vsg::dbox extent = scheme.tileExtent(tile);
+            const vsg::dvec3 c = scheme.tileCentre(tile);
+            GlobeTileBound bound;
+            bound.centre = toEcef(mercator, globe, c.x, c.y);
+            const int n = std::max(1, grid);
+            for (int j = 0; j <= n; ++j)
+                for (int i = 0; i <= n; ++i)
+                {
+                    const double x = extent.min.x + (extent.max.x - extent.min.x) * i / n;
+                    const double y = extent.min.y + (extent.max.y - extent.min.y) * j / n;
+                    bound.radius = std::max(bound.radius, (toEcef(mercator, globe, x, y) - bound.centre).length());
+                }
+            return bound;
+        }
+
+        /// The same tile as an N x N grid on the WGS84 ellipsoid, in geocentric metres around the tile's
+        /// centre. Grid lines are evenly spaced in Mercator x / y so the texture maps linearly, exactly as
+        /// on the flat quad; vertices are where those Mercator positions sit on the globe.
+        osg::ref_ptr<osg::Node> makeTileGlobeGrid(const TileScheme& scheme, const TileIndex& tile, osg::ref_ptr<osg::Image> image, int grid)
+        {
+            const MercatorProjection mercator;
+            const GeocentricProjection globe;
+            const vsg::dbox extent = scheme.tileExtent(tile);
+            const vsg::dvec3 c = scheme.tileCentre(tile);
+            const osg::Vec3d centre = toEcef(mercator, globe, c.x, c.y);
+            const int n = std::max(1, grid);
+
+            osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
+            osg::ref_ptr<osg::Vec3Array> normals = new osg::Vec3Array;
+            osg::ref_ptr<osg::Vec2Array> texcoords = new osg::Vec2Array;
+            for (int j = 0; j <= n; ++j)
+                for (int i = 0; i <= n; ++i)
+                {
+                    const double x = extent.min.x + (extent.max.x - extent.min.x) * i / n;
+                    const double y = extent.min.y + (extent.max.y - extent.min.y) * j / n; // south to north, like the image rows
+                    const osg::Vec3d world = toEcef(mercator, globe, x, y);
+                    const osg::Vec3d local = world - centre;
+                    vertices->push_back(osg::Vec3(static_cast<float>(local.x()), static_cast<float>(local.y()), static_cast<float>(local.z())));
+                    const vsg::dvec3 up = globe.upVector(vsg::dvec3(world.x(), world.y(), world.z()));
+                    normals->push_back(osg::Vec3(static_cast<float>(up.x), static_cast<float>(up.y), static_cast<float>(up.z)));
+                    texcoords->push_back(osg::Vec2(static_cast<float>(i) / n, static_cast<float>(j) / n));
+                }
+            osg::ref_ptr<osg::DrawElementsUShort> indices = new osg::DrawElementsUShort(GL_TRIANGLES);
+            const auto index = [n](int i, int j) { return static_cast<GLushort>(j * (n + 1) + i); };
+            for (int j = 0; j < n; ++j)
+                for (int i = 0; i < n; ++i)
+                {
+                    indices->push_back(index(i, j));
+                    indices->push_back(index(i + 1, j));
+                    indices->push_back(index(i + 1, j + 1));
+                    indices->push_back(index(i, j));
+                    indices->push_back(index(i + 1, j + 1));
+                    indices->push_back(index(i, j + 1));
+                }
+            osg::ref_ptr<osg::Vec4Array> colors = new osg::Vec4Array;
+            colors->push_back(osg::Vec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+            osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
+            geometry->setVertexArray(vertices);
+            geometry->setTexCoordArray(0, texcoords);
+            geometry->setNormalArray(normals, osg::Array::BIND_PER_VERTEX);
+            geometry->setColorArray(colors, osg::Array::BIND_OVERALL);
+            geometry->addPrimitiveSet(indices);
+            geometry->getOrCreateStateSet()->setTextureAttributeAndModes(0, makeTexture(image), osg::StateAttribute::ON);
+
+            osg::ref_ptr<osg::Geode> geode = new osg::Geode;
+            geode->addDrawable(geometry);
+            osg::ref_ptr<osg::MatrixTransform> transform = new osg::MatrixTransform(osg::Matrixd::translate(centre));
+            transform->addChild(geode);
+            return transform;
+        }
+
         /// A tile that hands over to its children's file once it grows past the pixel threshold.
-        osg::ref_ptr<osg::Node> makePagedTile(const TileScheme& scheme, const TileIndex& tile, osg::ref_ptr<osg::Node> quad, double pixelThreshold)
+        osg::ref_ptr<osg::Node> makePagedTile(const TileScheme& scheme, const TileIndex& tile, osg::ref_ptr<osg::Node> quad, double pixelThreshold, const GlobeTileBound* globe)
         {
             const vsg::dvec3 centre = scheme.tileCentre(tile);
             osg::ref_ptr<osg::PagedLOD> plod = new osg::PagedLOD;
             plod->setCenterMode(osg::LOD::USER_DEFINED_CENTER);
-            plod->setCenter(osg::Vec3d(centre.x, centre.y, centre.z));
-            plod->setRadius(scheme.tileRadius(tile));
+            plod->setCenter(globe ? globe->centre : osg::Vec3d(centre.x, centre.y, centre.z));
+            plod->setRadius(globe ? globe->radius : scheme.tileRadius(tile));
             plod->setRangeMode(osg::LOD::PIXEL_SIZE_ON_SCREEN);
             plod->addChild(quad, 0.0f, static_cast<float>(pixelThreshold)); // this tile while it is small
             plod->setFileName(1, TileScheme::relativePath(tile));           // its children once it is large
             plod->setRange(1, static_cast<float>(pixelThreshold), FLT_MAX);
             return plod;
+        }
+
+        std::string wellKnownText(const char* userInput)
+        {
+            OGRSpatialReference srs;
+            if (srs.SetFromUserInput(userInput) != OGRERR_NONE) return userInput;
+            char* wkt = nullptr;
+            if (srs.exportToWkt(&wkt) != OGRERR_NONE || !wkt) return userInput;
+            std::string text(wkt);
+            CPLFree(wkt);
+            return text;
         }
 
         /// Everything the workers share.
@@ -241,8 +349,16 @@ namespace ivevsg
             {
                 if (!source.read(scheme.tileExtent(tile), settings.tileSizePixels, rgb)) return {};
                 ++tilesWritten;
-                osg::ref_ptr<osg::Node> quad = makeTileQuad(scheme, tile, makeImage(rgb, settings.tileSizePixels));
-                return needsFile(tile) ? makePagedTile(scheme, tile, quad, threshold) : quad;
+                osg::ref_ptr<osg::Image> image = makeImage(rgb, settings.tileSizePixels);
+                if (settings.geocentric)
+                {
+                    osg::ref_ptr<osg::Node> grid = makeTileGlobeGrid(scheme, tile, image, settings.geocentricGrid);
+                    if (!needsFile(tile)) return grid;
+                    const GlobeTileBound bound = globeTileBound(scheme, tile, settings.geocentricGrid);
+                    return makePagedTile(scheme, tile, grid, threshold, &bound);
+                }
+                osg::ref_ptr<osg::Node> quad = makeTileQuad(scheme, tile, image);
+                return needsFile(tile) ? makePagedTile(scheme, tile, quad, threshold, nullptr) : quad;
             }
 
             bool write(osg::Node& node, const std::filesystem::path& file)
@@ -354,8 +470,16 @@ namespace ivevsg
                 report.error = "the source raster does not cover any part of the world square";
                 return report;
             }
+            // name the frame at the root the way VirtualPlanetBuilder does: WKT, plus an ellipsoid
+            // model when the coordinates are geocentric
+            osg::ref_ptr<osg::CoordinateSystemNode> csn = new osg::CoordinateSystemNode;
+            csn->setFormat("WKT");
+            csn->setCoordinateSystem(wellKnownText(settings.geocentric ? "EPSG:4326" : "EPSG:3857"));
+            if (settings.geocentric) csn->setEllipsoidModel(new osg::EllipsoidModel);
+            csn->addChild(root);
+            report.crs = settings.geocentric ? "EPSG:4978" : "EPSG:3857";
             report.rootFile = (job.outDir / "root.ive").string();
-            if (!job.write(*root, report.rootFile))
+            if (!job.write(*csn, report.rootFile))
             {
                 report.error = job.error;
                 return report;

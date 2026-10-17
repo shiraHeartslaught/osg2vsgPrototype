@@ -4,6 +4,10 @@
 //   ivetiler <source raster (EPSG:3857)> <output directory>
 //            [--max-level N] [--tile-size 256] [--detail-bias 1.0] [--threads N] [--uncompressed]
 //            [--detail-extent MINLON MINLAT MAXLON MAXLAT --detail-level N]
+//            [--geocentric [--globe-grid 8]]
+//
+// --geocentric writes the tile geometry on the WGS84 ellipsoid in EPSG:4978 metres (each tile an N x N
+// grid) instead of the flat Mercator plane, for data sets that live on the globe natively.
 //
 // Output: <out>/root.ive plus <out>/z/x/y.ive holding the four children of tile z/x/y (TileSetBuilder.h).
 // Files are zlib-compressed unless --uncompressed is given. --detail-extent/--detail-level generate a
@@ -37,6 +41,8 @@ int main(int argc, char** argv)
         else if (arg == "--detail-bias") settings.detailBias = std::atof(next("--detail-bias"));
         else if (arg == "--threads") settings.threads = static_cast<unsigned>(std::atoi(next("--threads")));
         else if (arg == "--uncompressed") settings.compressed = false;
+        else if (arg == "--geocentric" || arg == "--ecef") settings.geocentric = true;
+        else if (arg == "--globe-grid") settings.geocentricGrid = std::atoi(next("--globe-grid"));
         else if (arg == "--compressed") settings.compressed = true;
         else if (arg == "--detail-level") settings.detailMaxLevel = std::atoi(next("--detail-level"));
         else if (arg == "--detail-extent")
@@ -60,7 +66,8 @@ int main(int argc, char** argv)
     if (positionals < 2)
     {
         std::cerr << "usage: ivetiler <source raster (EPSG:3857)> <output directory> [--max-level N] [--tile-size 256] [--detail-bias 1.0]\n"
-                     "                [--threads N] [--uncompressed] [--detail-extent MINLON MINLAT MAXLON MAXLAT --detail-level N]\n";
+                     "                [--threads N] [--uncompressed] [--detail-extent MINLON MINLAT MAXLON MAXLAT --detail-level N]\n"
+                     "                [--geocentric [--globe-grid 8]]\n";
         return 1;
     }
     settings.sourceRaster = positional[0];
@@ -89,6 +96,7 @@ int main(int argc, char** argv)
     ivevsg::TileScheme scheme;
     scheme.tileSizePixels = settings.tileSizePixels;
     std::cout << "root:            " << report.rootFile << "\n"
+              << "frame:           " << report.crs << (settings.geocentric ? " (WGS84 ellipsoid, " + std::to_string(settings.geocentricGrid) + " x " + std::to_string(settings.geocentricGrid) + " grid per tile)" : " (flat Web Mercator plane)") << "\n"
               << "source:          " << report.sourceMetersPerPixel << " m/px\n"
               << "levels:          0.." << report.maxLevel << " everywhere (level " << report.maxLevel << " = " << scheme.metersPerPixel(report.maxLevel) << " m/px)";
     if (report.detailMaxLevel > report.maxLevel)

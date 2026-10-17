@@ -343,3 +343,59 @@ TEST_F(TileSetBuilderTest, DetailRegionGoesDeeperOnlyWhereAsked)
     EXPECT_EQ(census(*level2.node).draws, 4);
     EXPECT_EQ(census(*level2.node).pagedLODs, 1); // only the child touching the box pages further
 }
+
+// ---- geocentric output ------------------------------------------------------------------------
+
+TEST(TileSetBuilderGeocentric, TilesSitOnTheEllipsoidAndDeclareTheirFrame)
+{
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "ivevsg_tiles_ecef";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path source = writeSyntheticWorld(dir);
+    ASSERT_FALSE(source.empty());
+
+    ivevsg::TileSetSettings settings;
+    settings.sourceRaster = source.string();
+    settings.outputDirectory = (dir / "tiles").string();
+    settings.maxLevel = 1;
+    settings.geocentric = true;
+    settings.geocentricGrid = 4;
+    settings.threads = 1;
+    const ivevsg::TileSetReport report = ivevsg::buildTileSet(settings);
+    ASSERT_TRUE(report) << report.error;
+    EXPECT_EQ(report.crs, "EPSG:4978");
+
+    // read as the globe viewer would: the file declares EPSG:4978, so nothing is reprojected
+    ivevsg::LoaderSettings loaderSettings = ivevsg::SceneLoader::defaultSettings();
+    loaderSettings.targetCrs = "EPSG:4978";
+    loaderSettings.defaultSourceCrs = "EPSG:3857"; // must not be used: the root names its own frame
+    ivevsg::SceneLoader loader(loaderSettings);
+    const ivevsg::LoadResult root = loader.load(report.rootFile);
+    ASSERT_TRUE(root) << root.error;
+    EXPECT_EQ(root.sourceCrs, "EPSG:4978");
+    EXPECT_TRUE(root.targetCrs.empty()); // same frame: left as read
+
+    // the level-0 tile covers the world square: its corners reach +-a in x and y and +-b sin(85) in z
+    const vsg::dbox bounds = ivevsg::computeGeometryBounds(*root.node);
+    ASSERT_TRUE(bounds.valid());
+    const double a = 6378137.0, zMax = 6356752.314245179 * std::sin(85.05112878 * M_PI / 180.0);
+    EXPECT_NEAR(bounds.max.x, a, a * 0.01);
+    EXPECT_NEAR(bounds.min.x, -a, a * 0.01);
+    EXPECT_NEAR(bounds.max.y, a, a * 0.01);
+    EXPECT_NEAR(bounds.max.z, zMax, zMax * 0.01);
+    EXPECT_NEAR(bounds.min.z, -zMax, zMax * 0.01);
+
+    // the paged children (level 1) resolve through the inherited options and are geocentric too
+    ivevsg::LoaderSettings childSettings = loaderSettings;
+    childSettings.targetCrs = "EPSG:3857"; // a Mercator viewer reprojects them back onto the plane
+    ivevsg::SceneLoader mercatorLoader(childSettings);
+    const ivevsg::LoadResult onMap = mercatorLoader.load(report.rootFile);
+    ASSERT_TRUE(onMap) << onMap.error;
+    EXPECT_EQ(onMap.sourceCrs, "EPSG:4978");
+    EXPECT_EQ(onMap.targetCrs, "EPSG:3857");
+    const vsg::dbox flat = ivevsg::computeGeometryBounds(*onMap.node);
+    ASSERT_TRUE(flat.valid());
+    EXPECT_NEAR(flat.max.x, kE, kE * 0.001);
+    EXPECT_NEAR(flat.min.y, -kE, kE * 0.001);
+    EXPECT_NEAR(flat.max.z - flat.min.z, 0.0, 10.0); // back on the plane
+}

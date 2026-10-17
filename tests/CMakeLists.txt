@@ -15,6 +15,7 @@ add_executable(ivevsg_tests
     test_scene_loader.cpp
     test_tile_scheme.cpp
     test_tile_set_builder.cpp
+    test_world_view.cpp
 )
 find_package(GDAL CONFIG REQUIRED) # the tiler test writes a synthetic GeoTIFF
 find_package(unofficial-osg CONFIG REQUIRED) # the reader test builds OSG geometry directly

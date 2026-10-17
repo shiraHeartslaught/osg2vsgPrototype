@@ -188,11 +188,14 @@ TEST(Reproject, MercatorTileLandsOnTheGlobeWithTessellationAndMovedLod)
     EXPECT_NEAR((*normals)[0].x(), up.x, 1e-5);
     EXPECT_NEAR((*normals)[0].z(), up.z, 1e-5);
 
-    // the PagedLOD moved with the tile and shrank by the Mercator stretch at lat 50 (1 / cos 50 = 1.556)
+    // the PagedLOD moved with the tile and shrank by the Mercator stretch at lat 50 (1 / cos 50 = 1.556):
+    // the ranges exactly, the radius at least that much (it is widened to the reprojected content's
+    // bounding sphere, which a box-derived sphere makes a little larger than the minimal one)
     const osg::Vec3d lodCentre = tile.plod->getCenter();
     EXPECT_NEAR(lodCentre.x(), expectedCentre.x, 1.0);
     EXPECT_NEAR(lodCentre.z(), expectedCentre.z, 1.0);
-    EXPECT_NEAR(tile.plod->getRadius() / oldRadius, std::cos(50.0 * 3.14159265358979323846 / 180.0), 0.02);
+    EXPECT_GE(tile.plod->getRadius() / oldRadius, std::cos(50.0 * 3.14159265358979323846 / 180.0) - 0.02);
+    EXPECT_LT(tile.plod->getRadius() / oldRadius, 0.8);
     EXPECT_NEAR(tile.plod->getMinRange(0) / oldMinRange, std::cos(50.0 * 3.14159265358979323846 / 180.0), 0.02);
 }
 
@@ -201,6 +204,8 @@ TEST(Reproject, GeographicDegreesBecomeMercatorMetres)
     SyntheticTile tile = makeTile(false);
     // reinterpret the tile as 1 x 1 degree around lon 10 / lat 50
     tile.transform->setMatrix(osg::Matrixd::translate(10.0, 50.0, 0.0));
+    tile.plod->setCenter(osg::Vec3d(10.0, 50.0, 0.0));
+    tile.plod->setRadius(1.0);
     auto* vertices = dynamic_cast<osg::Vec3Array*>(tile.geometry->getVertexArray());
     (*vertices)[0] = osg::Vec3(-0.5f, -0.5f, 0.0f);
     (*vertices)[1] = osg::Vec3(0.5f, -0.5f, 0.0f);
@@ -294,4 +299,143 @@ TEST(Reproject, LoaderReprojectsAnOsgFileAndItsPagedChildrenOntoTheGlobe)
     EXPECT_GT(globe.worldToGeo(childBounds.max).altitude, -300000.0); // on the globe, not out in Mercator space
 
     std::filesystem::remove_all(dir);
+}
+
+namespace
+{
+    /// A VPB-style geocentric tile: a quad on the ellipsoid, 1 degree wide, centred on `centreLongitude`
+    /// at the equator, under a MatrixTransform at its ECEF centre, with a PagedLOD around it.
+    SyntheticTile makeEcefTile(double centreLongitude)
+    {
+        SyntheticTile tile;
+        ivevsg::GeocentricProjection globe;
+        const vsg::dvec3 c = globe.geoToWorld(ivevsg::GeoPoint{centreLongitude, 0.0, 0.0});
+        tile.centre = osg::Vec3d(c.x, c.y, c.z);
+        tile.geometry = new osg::Geometry;
+        osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
+        for (const auto& [dlon, dlat] : {std::pair{-0.5, -0.5}, std::pair{0.5, -0.5}, std::pair{0.5, 0.5}, std::pair{-0.5, 0.5}})
+        {
+            const vsg::dvec3 w = globe.geoToWorld(ivevsg::GeoPoint{centreLongitude + dlon, dlat, 0.0});
+            vertices->push_back(osg::Vec3(static_cast<float>(w.x - c.x), static_cast<float>(w.y - c.y), static_cast<float>(w.z - c.z)));
+        }
+        tile.geometry->setVertexArray(vertices);
+        osg::ref_ptr<osg::DrawElementsUShort> indices = new osg::DrawElementsUShort(GL_TRIANGLES);
+        for (unsigned short i : {0, 1, 2, 0, 2, 3}) indices->push_back(i);
+        tile.geometry->addPrimitiveSet(indices);
+        osg::ref_ptr<osg::Geode> geode = new osg::Geode;
+        geode->addDrawable(tile.geometry);
+        tile.transform = new osg::MatrixTransform(osg::Matrixd::translate(tile.centre));
+        tile.transform->addChild(geode);
+        tile.plod = new osg::PagedLOD;
+        tile.plod->setCenterMode(osg::LOD::USER_DEFINED_CENTER);
+        tile.plod->setCenter(tile.centre);
+        tile.plod->setRadius(80000.0);
+        tile.plod->setRangeMode(osg::LOD::DISTANCE_FROM_EYE_POINT);
+        tile.plod->addChild(tile.transform, 1000.0f, 1.0e9f);
+        tile.root = new osg::Group;
+        tile.root->addChild(tile.plod);
+        return tile;
+    }
+} // namespace
+
+TEST(Reproject, EcefTileAcrossTheAntimeridianStaysInOnePieceOnMercator)
+{
+    for (const double centreLongitude : {179.9, -179.9, 180.0})
+    {
+        SyntheticTile tile = makeEcefTile(centreLongitude);
+        ivevsg::ReprojectSettings settings;
+        settings.sourceCrs = "EPSG:4978";
+        settings.target = std::make_shared<ivevsg::MercatorProjection>();
+        const ivevsg::ReprojectReport report = ivevsg::reprojectScene(*tile.root, settings);
+        ASSERT_TRUE(report) << report.error;
+
+        // one degree of longitude at the equator is about 111 km: the quad must not span the world
+        double minX = 1e300, maxX = -1e300;
+        for (std::size_t i = 0; i < 4; ++i)
+        {
+            const osg::Vec3d w = worldVertex(tile, i);
+            minX = std::min(minX, w.x());
+            maxX = std::max(maxX, w.x());
+        }
+        EXPECT_NEAR(maxX - minX, 111319.49, 200.0) << "centre " << centreLongitude;
+        // and it sits just inside or just past the map edge, on the side its centre is on
+        const double edge = (std::abs(centreLongitude) == 180.0) ? kE : (centreLongitude > 0.0 ? kE : -kE);
+        EXPECT_NEAR((minX + maxX) * 0.5, edge * (centreLongitude == 180.0 ? 1.0 : 1.0) - (centreLongitude == 179.9 ? 11131.9 : centreLongitude == -179.9 ? -11131.9 : 0.0), 300.0) << "centre " << centreLongitude;
+        // the LOD centre is on the same side as its geometry
+        const osg::Vec3d lodCentre = osg::Vec3d(tile.plod->getCenter()); // root frame: world coordinates
+        EXPECT_NEAR(lodCentre.x(), (minX + maxX) * 0.5, 300.0) << "centre " << centreLongitude;
+    }
+}
+
+TEST(Reproject, NoUnwrappingOnTheGlobeAndPolesClampToTheMercatorEdge)
+{
+    // the same tile onto the globe is untouched by the unwrapping (no wrap width)
+    SyntheticTile tile = makeEcefTile(179.9);
+    ivevsg::ReprojectSettings settings;
+    settings.sourceCrs = "EPSG:4978";
+    settings.target = std::make_shared<ivevsg::GeocentricProjection>();
+    ASSERT_TRUE(ivevsg::reprojectScene(*tile.root, settings).skipped);
+
+    // a geocentric point at the pole lands on the Mercator edge row, not at infinity
+    ivevsg::GeocentricProjection globe;
+    ivevsg::MercatorProjection mercator;
+    const vsg::dvec3 pole = globe.geoToWorld(ivevsg::GeoPoint{0.0, 90.0, 0.0});
+    std::unique_ptr<ivevsg::CrsTransform> crs = ivevsg::CrsTransform::create("EPSG:4978");
+    ASSERT_TRUE(crs);
+    ivevsg::GeoPoint geo;
+    ASSERT_TRUE(crs->toGeographic(pole.x, pole.y, pole.z, geo));
+    const vsg::dvec3 onMap = mercator.geoToWorld(geo);
+    EXPECT_TRUE(std::isfinite(onMap.y));
+    EXPECT_NEAR(onMap.y, kE, 1.0);
+}
+
+TEST(CrsTransform, DisplayNamesAreShort)
+{
+    EXPECT_EQ(ivevsg::CrsTransform::displayName("EPSG:3857"), "EPSG:3857");
+    EXPECT_EQ(ivevsg::CrsTransform::displayName("epsg:4978"), "EPSG:4978");
+    // the WKT VirtualPlanetBuilder writes carries the authority code
+    const std::string wkt = "PROJCS[\"WGS 84 / Pseudo-Mercator\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433]],PROJECTION[\"Mercator_1SP\"],PARAMETER[\"central_meridian\",0],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1],AUTHORITY[\"EPSG\",\"3857\"]]";
+    EXPECT_EQ(ivevsg::CrsTransform::displayName(wkt), "EPSG:3857");
+    EXPECT_EQ(ivevsg::CrsTransform::displayName(""), "");
+    EXPECT_EQ(ivevsg::CrsTransform::displayName("not a crs at all"), "not a crs at all");
+}
+
+TEST(Reproject, HighLatitudeMercatorTileKeepsASphereThatEnclosesItOnTheGlobe)
+{
+    // a Mercator tile from 60 to 85 degrees north: at its centre (about 75 N) the globe shrinks it to a
+    // quarter, at its southern edge only to a half; the sphere must cover the whole reprojected quad
+    SyntheticTile tile = makeTile(false);
+    ivevsg::MercatorProjection mercator;
+    const vsg::dvec3 sw = mercator.geoToWorld(ivevsg::GeoPoint{0.0, 60.0, 0.0});
+    const vsg::dvec3 ne = mercator.geoToWorld(ivevsg::GeoPoint{90.0, 85.0, 0.0});
+    const osg::Vec3d centre((sw.x + ne.x) * 0.5, (sw.y + ne.y) * 0.5, 0.0);
+    const float hx = static_cast<float>((ne.x - sw.x) * 0.5), hy = static_cast<float>((ne.y - sw.y) * 0.5);
+    auto* vertices = dynamic_cast<osg::Vec3Array*>(tile.geometry->getVertexArray());
+    (*vertices)[0] = osg::Vec3(-hx, -hy, 0.0f);
+    (*vertices)[1] = osg::Vec3(hx, -hy, 0.0f);
+    (*vertices)[2] = osg::Vec3(hx, hy, 0.0f);
+    (*vertices)[3] = osg::Vec3(-hx, hy, 0.0f);
+    tile.transform->setMatrix(osg::Matrixd::translate(centre));
+    tile.plod->setCenter(centre);
+    tile.plod->setRadius(std::sqrt(double(hx) * hx + double(hy) * hy));
+
+    ivevsg::ReprojectSettings settings;
+    settings.sourceCrs = "EPSG:3857";
+    settings.target = std::make_shared<ivevsg::GeocentricProjection>();
+    settings.quadTessellation = 8;
+    ASSERT_TRUE(ivevsg::reprojectScene(*tile.root, settings));
+
+    const osg::Vec3d lodCentre(tile.plod->getCenter()); // root frame: world coordinates
+    const double lodRadius = tile.plod->getRadius();
+    auto* grid = dynamic_cast<osg::Vec3Array*>(tile.geometry->getVertexArray());
+    ASSERT_TRUE(grid);
+    double farthest = 0.0;
+    for (std::size_t i = 0; i < grid->size(); ++i)
+    {
+        const osg::Vec3d w = osg::Vec3d((*grid)[i]) * tile.transform->getMatrix();
+        farthest = std::max(farthest, (w - lodCentre).length());
+    }
+    EXPECT_LE(farthest, lodRadius * 1.0001) << "farthest vertex " << farthest << " m, radius " << lodRadius << " m";
+    // and not absurdly large either: well under the old flat radius
+    EXPECT_LT(lodRadius, std::sqrt(double(hx) * hx + double(hy) * hy));
 }

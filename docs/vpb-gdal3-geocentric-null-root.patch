@@ -1,0 +1,23 @@
+diff --git a/src/vpb/SpatialProperties.cpp b/src/vpb/SpatialProperties.cpp
+index 69bc77c..32064b5 100644
+--- a/src/vpb/SpatialProperties.cpp
++++ b/src/vpb/SpatialProperties.cpp
+@@ -43,10 +43,14 @@ CoordinateSystemType vpb::getCoordinateSystemType(const osg::CoordinateSystemNod
+ 
+     free(projection_string);
+ 
+-    if (strcmp(lhsSR.GetRoot()->GetValue(),"GEOCCS")==0) log(osg::INFO,"    lhsSR. is GEOCENTRIC ");
+-    
+-
+-    if (strcmp(lhsSR.GetRoot()->GetValue(),"GEOCCS")==0) return GEOCENTRIC;
++    // GDAL 3: an empty or unparseable string leaves the spatial reference without a root node
++    // (e.g. the destination of a --geocentric build before it has been assigned), so check before
++    // dereferencing it instead of crashing.
++    const OGR_SRSNode* root = lhsSR.GetRoot();
++    const bool isGeocentric = root && root->GetValue() && strcmp(root->GetValue(),"GEOCCS")==0;
++    if (isGeocentric) log(osg::INFO,"    lhsSR. is GEOCENTRIC ");
++
++    if (isGeocentric) return GEOCENTRIC;
+     if (lhsSR.IsGeographic()) return GEOGRAPHIC;
+     if (lhsSR.IsProjected()) return PROJECTED;
+     if (lhsSR.IsLocal()) return LOCAL;

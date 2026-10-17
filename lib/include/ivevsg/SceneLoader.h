@@ -44,6 +44,8 @@ namespace ivevsg
     {
         vsg::ref_ptr<vsg::Node> node;
         std::string error;
+        std::string sourceCrs; // the CRS the file was taken to be in ("" for formats that carry none, e.g. VSG native)
+        std::string targetCrs; // the frame it was reprojected into ("" when left as read)
 
         explicit operator bool() const { return node.valid(); }
     };

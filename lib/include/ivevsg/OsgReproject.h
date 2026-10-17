@@ -43,6 +43,8 @@ namespace ivevsg
     /// old origin, keeping float precision). LOD / PagedLOD centres move with their content and their
     /// radii and distance ranges are scaled by the local change of scale, so paging keeps working.
     /// Normals are recomputed as the target's up vector. Works on paged databases file by file, since
-    /// each file is a self-contained subtree.
+    /// each file is a self-contained subtree. For targets that repeat sideways (Projection::wrapWidth()),
+    /// longitudes are unwrapped around the file's centre so geometry crossing the antimeridian stays in
+    /// one piece just past the map edge, where the wrapped copy of the world shows it.
     ReprojectReport reprojectScene(osg::Node& scene, const ReprojectSettings& settings);
 } // namespace ivevsg

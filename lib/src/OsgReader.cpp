@@ -48,7 +48,12 @@ namespace ivevsg
             std::string crs;
             void apply(osg::CoordinateSystemNode& csn) override
             {
-                if (crs.empty()) crs = csn.getCoordinateSystem();
+                if (crs.empty())
+                {
+                    // an ellipsoid model marks a geocentric database: the coordinate system string
+                    // then names the geographic datum the ECEF frame is based on, not the coordinates
+                    crs = csn.getEllipsoidModel() ? "EPSG:4978" : csn.getCoordinateSystem();
+                }
                 traverse(csn);
             }
         };
@@ -90,6 +95,8 @@ namespace ivevsg
     const char* const OsgReader::kSourceCrs = "ivevsg.source_crs";
     const char* const OsgReader::kDefaultSourceCrs = "ivevsg.default_source_crs";
     const char* const OsgReader::kQuadTessellation = "ivevsg.quad_tessellation";
+    const char* const OsgReader::kNodeSourceCrs = "ivevsg.node_source_crs";
+    const char* const OsgReader::kNodeTargetCrs = "ivevsg.node_target_crs";
 
     OsgReader::OsgReader() = default;
 
@@ -124,23 +131,25 @@ namespace ivevsg
 
         normaliseByteColourArrays(*scene);
 
-        // Reproject into the current projection's frame when the options ask for it. The source CRS
-        // comes from the load request, else from the file's CoordinateSystemNode, else from the
-        // loader's default. The values travel with the options into every PagedLOD child, so paged
-        // tiles are reprojected the same way as their root.
-        std::string targetCrs;
-        if (options && options->getValue(OsgReader::kTargetCrs, targetCrs) && !targetCrs.empty())
+        // The source CRS comes from the load request, else from the file's CoordinateSystemNode, else
+        // from the loader's default. Paged children are read with a copy of the options this file was
+        // read with, so the CRS resolved here (VPB and ivetiler name it at the root only) is written
+        // into them and every tile of the database is treated the same way as its root.
+        std::string sourceCrs, targetCrs;
+        if (options)
         {
-            std::string sourceCrs;
             options->getValue(OsgReader::kSourceCrs, sourceCrs);
-            if (sourceCrs.empty())
-            {
-                FindCoordinateSystem finder;
-                scene->accept(finder);
-                sourceCrs = finder.crs;
-            }
-            if (sourceCrs.empty()) options->getValue(OsgReader::kDefaultSourceCrs, sourceCrs);
+            options->getValue(OsgReader::kTargetCrs, targetCrs);
+        }
+        if (sourceCrs.empty()) sourceCrs = declaredCrs(*scene);
+        if (sourceCrs.empty() && options) options->getValue(OsgReader::kDefaultSourceCrs, sourceCrs);
+        vsg::ref_ptr<vsg::Options> childOptions = options ? vsg::Options::create(*options) : vsg::Options::create();
+        if (!sourceCrs.empty()) childOptions->setValue(OsgReader::kSourceCrs, sourceCrs);
 
+        // Reproject into the current projection's frame when the options ask for it.
+        bool reprojected = false;
+        if (!targetCrs.empty())
+        {
             ReprojectSettings settings;
             settings.sourceCrs = sourceCrs;
             settings.target = createProjection(targetCrs);
@@ -157,10 +166,24 @@ namespace ivevsg
             {
                 const ReprojectReport report = reprojectScene(*scene, settings);
                 if (!report) vsg::warn("OsgReader: reprojection of ", filename, " failed: ", report.error);
+                reprojected = report && !report.skipped;
             }
         }
 
-        return osg2vsg::convert(*scene, options);
+        vsg::ref_ptr<vsg::Node> converted = osg2vsg::convert(*scene, childOptions);
+        if (converted)
+        {
+            converted->setValue(OsgReader::kNodeSourceCrs, sourceCrs);
+            converted->setValue(OsgReader::kNodeTargetCrs, reprojected ? targetCrs : std::string());
+        }
+        return converted;
+    }
+
+    std::string OsgReader::declaredCrs(osg::Node& scene)
+    {
+        FindCoordinateSystem finder;
+        scene.accept(finder);
+        return finder.crs;
     }
 
     bool OsgReader::getFeatures(Features& features) const

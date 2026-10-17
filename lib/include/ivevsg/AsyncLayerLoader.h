@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ivevsg/MapScene.h>
+
 #include <vsg/app/CompileManager.h>
 #include <vsg/core/ref_ptr.h>
 #include <vsg/nodes/Node.h>
@@ -20,6 +22,9 @@ namespace ivevsg
     {
         std::string path;
         std::string name;
+        LayerSource source;    // as requested
+        std::string sourceCrs; // as resolved by the loader
+        std::string targetCrs;
         vsg::ref_ptr<vsg::Node> node;
         vsg::CompileResult compileResult; // from the compile step, to hand to vsg::updateViewer() on the main thread
         std::string error;
@@ -43,21 +48,23 @@ namespace ivevsg
         AsyncLayerLoader(const AsyncLayerLoader&) = delete;
         AsyncLayerLoader& operator=(const AsyncLayerLoader&) = delete;
 
-        /// Starts loading; name defaults to the file's simple name.
-        void request(const std::string& path, const std::string& name = {});
+        /// Starts loading; name defaults to the file's simple name, sourceCrs to what the file declares.
+        void request(const std::string& path, const std::string& name = {}, const std::string& sourceCrs = {});
+        void request(const LayerSource& source) { request(source.path, source.name, source.sourceCrs); }
 
         /// Finished loads, successful or not, removed from the queue. Never blocks.
         std::vector<LayerLoadOutcome> takeCompleted();
 
         /// Names of loads still running.
         std::vector<std::string> inFlight() const;
+        /// Sources of loads still running (to re-request them elsewhere).
+        std::vector<LayerSource> inFlightSources() const;
         std::size_t pendingCount() const;
 
     private:
         struct Job
         {
-            std::string path;
-            std::string name;
+            LayerSource source;
             std::future<LayerLoadOutcome> future;
         };
 

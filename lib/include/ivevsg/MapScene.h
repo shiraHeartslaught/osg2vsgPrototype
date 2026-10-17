@@ -15,11 +15,22 @@ namespace ivevsg
     /// Group drawing the base map first and the overlay (e.g. terrain) on top of it.
     vsg::ref_ptr<vsg::Group> createLayeredScene(vsg::ref_ptr<vsg::Node> baseMap, vsg::ref_ptr<vsg::Node> overlay);
 
+    /// Where a layer comes from, kept so the scene can be rebuilt in another projection.
+    struct LayerSource
+    {
+        std::string path;
+        std::string name;      // "" = the file's simple name
+        std::string sourceCrs; // CRS the file is to be taken as; "" = what the file declares, else the loader default
+    };
+
     struct Layer
     {
         std::string name;
-        vsg::ref_ptr<vsg::Node> node;               // the loaded content
+        vsg::ref_ptr<vsg::Node> node;                 // the loaded content
         vsg::ref_ptr<vsg::MatrixTransform> placement; // what is actually in the switch; see setLayerHeight()
+        LayerSource source;
+        std::string sourceCrs; // the CRS the file was actually taken as ("" when the format carries none)
+        std::string targetCrs; // the frame it was reprojected into ("" = shown as read)
     };
 
     /// The base map plus any number of named data layers drawn above it, each switchable at runtime.
@@ -38,6 +49,9 @@ namespace ivevsg
         bool baseVisible() const;
 
         std::size_t addLayer(const std::string& name, vsg::ref_ptr<vsg::Node> node); // returns its index
+        std::size_t addLayer(Layer layer);                                             // with its source / CRS record
+        /// The sources of the layers in order (to reload them elsewhere).
+        std::vector<LayerSource> sources() const;
         bool removeLayer(std::size_t index);
         std::size_t layerCount() const { return _layers.size(); }
         const Layer& layer(std::size_t index) const { return _layers.at(index); }

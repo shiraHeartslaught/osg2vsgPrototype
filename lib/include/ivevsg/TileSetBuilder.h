@@ -31,6 +31,12 @@ namespace ivevsg
         bool compressed = true;
         /// Worker threads; 0 = one per hardware thread. Every file is independent, so this scales well.
         unsigned threads = 0;
+        /// Tile geometry on the WGS84 ellipsoid in geocentric metres (EPSG:4978, "ECEF") instead of the
+        /// flat EPSG:3857 plane. The tiling, texturing and paging stay WebMercatorQuad; only where the
+        /// corners sit changes, so the set drapes a globe natively and a Mercator viewer reprojects it.
+        bool geocentric = false;
+        /// Cells per tile side on the globe (each tile becomes an N x N grid so it follows the curvature).
+        int geocentricGrid = 8;
         /// Called after each file (from worker threads, serialised); return false to abort.
         std::function<bool(std::size_t filesDone, std::size_t filesTotal)> progress;
 
@@ -41,6 +47,7 @@ namespace ivevsg
     struct TileSetReport
     {
         std::string rootFile;
+        std::string crs; // "EPSG:3857" or "EPSG:4978", also recorded in root.ive's CoordinateSystemNode
         int maxLevel = 0;
         int detailMaxLevel = 0;
         double sourceMetersPerPixel = 0.0;
@@ -68,8 +75,11 @@ namespace ivevsg
     ///
     ///   root.ive   the level-0 tile; a PagedLOD that loads 0/0/0.ive when it grows too large on screen
     ///   z/x/y.ive  the four level-(z+1) children of tile z/x/y, each a textured quad in EPSG:3857 metres
-    ///              and (where deeper tiles exist) a PagedLOD pointing at its own z+1/x'/y'.ive
+    ///              (or an N x N grid on the ellipsoid in EPSG:4978 with settings.geocentric) and, where
+    ///              deeper tiles exist, a PagedLOD pointing at its own z+1/x'/y'.ive
     ///
+    /// root.ive carries an osg::CoordinateSystemNode naming the frame (with an EllipsoidModel for a
+    /// geocentric set, the VirtualPlanetBuilder convention), so a viewer can tell the two apart.
     /// Textures are embedded in the files, so a tile set is self-contained.
     TileSetReport buildTileSet(const TileSetSettings& settings);
 } // namespace ivevsg

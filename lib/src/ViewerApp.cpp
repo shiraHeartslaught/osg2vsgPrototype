@@ -1,4 +1,4 @@
-#include <ivevsg/CameraFraming.h>
+#include <ivevsg/BaseMap.h>
 #include <ivevsg/SceneBounds.h>
 #include <ivevsg/SceneLoader.h>
 #include <ivevsg/ViewerApp.h>
@@ -13,13 +13,188 @@
 
 namespace ivevsg
 {
-    ViewerApp::ViewerApp(ViewerSettings settings, std::shared_ptr<const Projection> projection) :
+    ViewerApp::ViewerApp(ViewerSettings settings, std::unique_ptr<WorldView> view) :
         _settings(std::move(settings)),
-        _projection(std::move(projection))
+        _view(std::move(view))
     {
+        if (!_view) _view = createWorldView("mercator", _settings.views);
     }
 
-    ViewerApp::~ViewerApp() = default;
+    ViewerApp::~ViewerApp()
+    {
+        uninstallView();
+    }
+
+    // ---- what to show ----------------------------------------------------------------------------
+
+    void ViewerApp::setBaseSource(const std::string& viewKey, BaseSource source)
+    {
+        _baseSources[viewKey] = std::move(source);
+    }
+
+    BaseSource ViewerApp::baseSource(const std::string& viewKey) const
+    {
+        auto it = _baseSources.find(viewKey);
+        return it == _baseSources.end() ? BaseSource{} : it->second;
+    }
+
+    bool ViewerApp::addLayer(LayerSource source)
+    {
+        if (source.name.empty()) source.name = vsg::simpleFilename(vsg::Path(source.path)).string();
+        if (!_viewer)
+        {
+            _startupLayers.push_back(std::move(source));
+            return true;
+        }
+        _lastLayerError.clear();
+        return loadLayerNow(source, _lastLayerError);
+    }
+
+    void ViewerApp::queueLayerLoad(LayerSource source)
+    {
+        if (source.name.empty()) source.name = vsg::simpleFilename(vsg::Path(source.path)).string();
+        _pendingLayerLoads.push_back(std::move(source));
+    }
+
+    bool ViewerApp::removeLayer(std::size_t index)
+    {
+        return _layers && _layers->removeLayer(index);
+    }
+
+    std::vector<std::string> ViewerApp::loadingLayers() const
+    {
+        std::vector<std::string> names;
+        for (const LayerSource& source : _pendingLayerLoads) names.push_back(source.name);
+        if (_asyncLoader)
+        {
+            for (auto& name : _asyncLoader->inFlight()) names.push_back(name);
+        }
+        return names;
+    }
+
+    bool ViewerApp::loadLayerNow(const LayerSource& source, std::string& error)
+    {
+        if (!_layers || !_loader)
+        {
+            error = "no scene yet";
+            return false;
+        }
+        const LoadResult loaded = _loader->load(source.path, source.sourceCrs);
+        if (!loaded)
+        {
+            error = loaded.error;
+            return false;
+        }
+        if (_viewer && _viewer->compileManager)
+        {
+            try
+            {
+                vsg::CompileResult result = _viewer->compileManager->compile(loaded.node);
+                if (result) vsg::updateViewer(*_viewer, result); // registers new PagedLODs with the pager etc.
+            }
+            catch (const vsg::Exception& e)
+            {
+                error = "Vulkan error compiling " + source.path + ": " + e.message;
+                return false;
+            }
+        }
+        Layer layer;
+        layer.name = source.name;
+        layer.node = loaded.node;
+        layer.source = source;
+        layer.sourceCrs = loaded.sourceCrs;
+        layer.targetCrs = loaded.targetCrs;
+        _layers->addLayer(std::move(layer));
+        return true;
+    }
+
+    // ---- scene assembly --------------------------------------------------------------------------
+
+    double ViewerApp::viewportAspect() const
+    {
+        if (_window)
+        {
+            const auto extent = _window->extent2D();
+            if (extent.height > 0) return static_cast<double>(extent.width) / static_cast<double>(extent.height);
+        }
+        return static_cast<double>(_settings.width) / static_cast<double>(std::max<uint32_t>(1, _settings.height));
+    }
+
+    bool ViewerApp::buildScene(std::string& error)
+    {
+        // a loader targeting this view's frame; paged tiles of the scene it loads inherit its options
+        LoaderSettings loaderSettings = SceneLoader::defaultSettings();
+        loaderSettings.logReads = _settings.logReads;
+        loaderSettings.targetCrs = _view->projection()->crs();
+        loaderSettings.defaultSourceCrs = _settings.defaultSourceCrs;
+        loaderSettings.quadTessellation = _view->quadTessellation();
+        _loader = std::make_shared<SceneLoader>(loaderSettings);
+        _layers = std::make_shared<LayerStack>();
+        _underlay = vsg::MatrixTransform::create();
+        _baseInfo = BaseInfo{};
+
+        // Base map: the pyramid or image registered for this view. It hangs under the "underlay"
+        // transform that the frame loop keeps a small, altitude-scaled distance below the data
+        // surface, so data always draws on top without z-fighting and without disturbing the tiles'
+        // LOD choice.
+        const BaseSource base = baseSource(_view->key());
+        vsg::ref_ptr<vsg::Node> baseNode;
+        if (!base.tiles.empty())
+        {
+            const LoadResult tiles = _loader->load(base.tiles);
+            if (!tiles)
+            {
+                error = "Failed to load tile set " + base.tiles + ": " + tiles.error;
+                return false;
+            }
+            baseNode = tiles.node;
+            _baseInfo = BaseInfo{true, base.tiles, "tile pyramid", tiles.sourceCrs, tiles.targetCrs};
+        }
+        else if (!base.image.empty() && _view->supportsFlatBaseImage())
+        {
+            BaseMapSettings imageSettings;
+            imageSettings.imagePath = base.image;
+            const BaseMapResult image = createBaseMap(imageSettings, _loader->options());
+            baseNode = image.node;
+            _baseInfo = BaseInfo{true, base.image, "image", _view->projection()->crs(), ""};
+        }
+        else
+        {
+            _baseInfo.kind = "none";
+        }
+        if (baseNode)
+        {
+            if (_viewer && _viewer->compileManager)
+            {
+                try
+                {
+                    vsg::CompileResult result = _viewer->compileManager->compile(baseNode);
+                    if (result) vsg::updateViewer(*_viewer, result);
+                }
+                catch (const vsg::Exception& e)
+                {
+                    error = "Vulkan error compiling the base map: " + e.message;
+                    return false;
+                }
+            }
+            _underlay->addChild(baseNode);
+            _layers->setBase(_underlay);
+        }
+        _world = _layers->node();
+        _bounds = baseNode ? computeGeometryBounds(*baseNode) : vsg::dbox();
+        return true;
+    }
+
+    void ViewerApp::startAsyncLoader()
+    {
+        if (!_viewer || !_viewer->compileManager || !_loader) return;
+        vsg::ref_ptr<vsg::Viewer> viewer = _viewer;
+        _asyncLoader = std::make_unique<AsyncLayerLoader>(_loader, [viewer](vsg::ref_ptr<vsg::Node> node) {
+            return viewer->compileManager->compile(node); // CompileManager is thread safe
+        });
+    }
+
+    // ---- window and views ------------------------------------------------------------------------
 
     void ViewerApp::addUi(std::function<bool()> panel)
     {
@@ -30,20 +205,40 @@ namespace ivevsg
             _pendingPanels.push_back(std::move(panel));
     }
 
-    bool ViewerApp::initialize(vsg::ref_ptr<vsg::Node> scene, vsg::ref_ptr<vsg::Node> focus)
+    void ViewerApp::installView(const ViewState* carryOver)
     {
-        _scene = scene;
-        if (!_scene)
+        if (!_viewer || !_camera) return;
+        _view->attach(_camera, _bounds, _settings.framingElevationDegrees);
+        if (carryOver)
         {
-            _error = "No scene to display";
-            return false;
+            _view->lookAt(carryOver->centre, carryOver->altitude);
+            if (_view->hasOrientation()) _view->setOrientation(carryOver->heading, carryOver->tilt);
         }
-        if (!_projection)
-        {
-            _error = "No projection set";
-            return false;
-        }
+        if (auto handler = _view->eventHandler()) _viewer->addEventHandler(handler); // after ImGui and the close handler
+        _reportedOnce = false;
+    }
 
+    void ViewerApp::uninstallView()
+    {
+        if (!_view) return;
+        if (_viewer)
+        {
+            if (auto handler = _view->eventHandler())
+            {
+                auto& handlers = _viewer->getEventHandlers();
+                handlers.erase(std::remove(handlers.begin(), handlers.end(), handler), handlers.end());
+            }
+        }
+        _view->detach();
+    }
+
+    bool ViewerApp::initialize()
+    {
+        if (!_view)
+        {
+            _error = "No view set";
+            return false;
+        }
         try
         {
             auto traits = vsg::WindowTraits::create();
@@ -62,19 +257,41 @@ namespace ivevsg
             }
             _viewer->addWindow(_window);
 
-            _bounds = computeGeometryBounds(focus ? *focus : *_scene);
-            const bool mapMode = _settings.navigation == NavigationMode::Map;
-            const CameraPose pose = _projection->framingPose(_bounds, mapMode ? 90.0 : _settings.framingElevationDegrees);
+            std::string error;
+            if (!buildScene(error))
+            {
+                _error = error;
+                _viewer = {};
+                return false;
+            }
+            // start-up layers load now, on this thread; the first one frames the start view
+            vsg::ref_ptr<vsg::Node> focus;
+            for (const LayerSource& source : _startupLayers)
+            {
+                if (!loadLayerNow(source, error))
+                {
+                    _error = "Failed to load " + source.path + ": " + error;
+                    _viewer = {};
+                    return false;
+                }
+                if (!focus) focus = _layers->layer(_layers->layerCount() - 1).node;
+            }
+            _startupLayers.clear();
+            if (focus) _bounds = computeGeometryBounds(*focus);
+            if (!_bounds.valid() && _world) _bounds = computeGeometryBounds(*_world);
 
-            _lookAt = vsg::LookAt::create(pose.eye, pose.centre, pose.up);
+            _sceneRoot = vsg::Group::create();
+            _sceneRoot->addChild(_view->assembleScene(_world, viewportAspect()));
+
+            _lookAt = vsg::LookAt::create();
             const auto extent = _window->extent2D();
             const double aspect = static_cast<double>(extent.width) / static_cast<double>(extent.height);
-            _perspective = vsg::Perspective::create(_settings.fieldOfViewDegrees, aspect, pose.nearPlane, pose.farPlane);
+            _perspective = vsg::Perspective::create(_settings.fieldOfViewDegrees, aspect, 1.0, 1.0e8);
             _camera = vsg::Camera::create(_perspective, _lookAt, vsg::ViewportState::create(extent));
 
             // the same graph vsg::createCommandGraphForView() builds (view + headlight), with the ImGui
             // overlay drawn after the view inside the same render pass
-            auto renderGraph = vsg::createRenderGraphForView(_window, _camera, _scene);
+            auto renderGraph = vsg::createRenderGraphForView(_window, _camera, _sceneRoot);
             auto commandGraph = vsg::CommandGraph::create(_window, renderGraph);
             if (_settings.ui)
             {
@@ -87,31 +304,12 @@ namespace ivevsg
 
             if (_imgui) _viewer->addEventHandler(vsgImGui::SendEventsToImGui::create()); // first: marks events ImGui consumes as handled
             _viewer->addEventHandler(vsg::CloseHandler::create(_viewer));              // Esc / close button
-            if (mapMode)
-            {
-                MapNavigationSettings navigation = _settings.mapNavigation;
-                if (!navigation.viewLimits.valid()) navigation.viewLimits = _projection->viewLimits();
-                if (navigation.wrapWidth <= 0.0) navigation.wrapWidth = _projection->wrapWidth();
-                _mapNavigation = MapNavigationHandler::create(_camera, navigation); // drag pan, wheel zoom
-                _viewer->addEventHandler(_mapNavigation);
-            }
-            else if (_settings.navigation == NavigationMode::Globe && _projection->geocentric())
-            {
-                _globeNavigation = GlobeNavigationHandler::create(_camera, _projection, _settings.globeNavigation); // drag spins the globe
-                _viewer->addEventHandler(_globeNavigation);
-            }
-            else if (_projection->geocentric())
-            {
-                _viewer->addEventHandler(vsg::Trackball::create(_camera, vsg::EllipsoidModel::create())); // orbit about the look-at point
-            }
-            else
-            {
-                _viewer->addEventHandler(vsg::Trackball::create(_camera)); // LMB orbit, RMB zoom, MMB pan
-            }
+            installView(nullptr);
 
             // compile() uploads GPU resources and, when the scene contains PagedLOD nodes,
             // starts the database pager that streams tiles in through the loader's options.
             _viewer->compile();
+            startAsyncLoader();
         }
         catch (const vsg::Exception& e)
         {
@@ -122,144 +320,112 @@ namespace ivevsg
         return true;
     }
 
-    bool ViewerApp::loadLayer(const std::string& path, const std::string& name)
+    bool ViewerApp::switchView(const std::string& viewKey)
     {
-        _lastLayerError.clear();
-        if (!_layers || !_loader)
+        std::unique_ptr<WorldView> view = createWorldView(viewKey, _settings.views);
+        if (!view)
         {
-            _lastLayerError = "no layer stack or loader attached";
+            _error = "unknown view '" + viewKey + "'";
             return false;
         }
-        const LoadResult loaded = _loader->load(path);
-        if (!loaded)
-        {
-            _lastLayerError = loaded.error;
-            return false;
-        }
-        if (_viewer && _viewer->compileManager)
-        {
-            try
-            {
-                vsg::CompileResult result = _viewer->compileManager->compile(loaded.node);
-                if (result) vsg::updateViewer(*_viewer, result); // registers new PagedLODs with the pager etc.
-            }
-            catch (const vsg::Exception& e)
-            {
-                _lastLayerError = "Vulkan error compiling " + path + ": " + e.message;
-                return false;
-            }
-        }
-        std::string layerName = name;
-        if (layerName.empty()) layerName = vsg::simpleFilename(vsg::Path(path)).string();
-        _layers->addLayer(layerName, loaded.node);
-        return true;
+        return switchView(std::move(view));
     }
 
-    void ViewerApp::queueLayerLoad(const std::string& path, const std::string& name)
+    bool ViewerApp::switchView(std::unique_ptr<WorldView> view)
     {
-        _pendingLayerLoads.emplace_back(path, name);
-    }
+        if (!view) return false;
+        if (!_viewer)
+        {
+            _view = std::move(view); // nothing built yet: simply start with this one
+            return true;
+        }
 
-    std::vector<std::string> ViewerApp::loadingLayers() const
-    {
-        std::vector<std::string> names;
-        for (const auto& [path, name] : _pendingLayerLoads) names.push_back(name.empty() ? vsg::simpleFilename(vsg::Path(path)).string() : name);
+        // the sources of everything shown, to reload in the new frame
+        std::vector<LayerSource> sources = _layers ? _layers->sources() : std::vector<LayerSource>{};
         if (_asyncLoader)
         {
-            for (auto& name : _asyncLoader->inFlight()) names.push_back(name);
+            for (const LayerSource& source : _asyncLoader->inFlightSources()) sources.push_back(source);
         }
-        return names;
+        for (const LayerSource& source : _pendingLayerLoads) sources.push_back(source);
+        _pendingLayerLoads.clear();
+
+        // build the new scene first so a failing base keeps the current view intact
+        const ViewState carryOver = _view->state();
+        std::unique_ptr<WorldView> previous = std::move(_view);
+        _view = std::move(view);
+        std::shared_ptr<SceneLoader> previousLoader = _loader;
+        std::shared_ptr<LayerStack> previousLayers = _layers;
+        vsg::ref_ptr<vsg::MatrixTransform> previousUnderlay = _underlay;
+        vsg::ref_ptr<vsg::Node> previousWorld = _world;
+        const vsg::dbox previousBounds = _bounds;
+        std::string error;
+        if (!buildScene(error))
+        {
+            _error = error;
+            _view = std::move(previous);
+            _loader = previousLoader;
+            _layers = previousLayers;
+            _underlay = previousUnderlay;
+            _world = previousWorld;
+            _bounds = previousBounds;
+            for (const LayerSource& source : sources) _pendingLayerLoads.push_back(source); // keep what was queued
+            return false;
+        }
+
+        // hand over: old navigation out, new scene in, new navigation in at the same place
+        if (previous)
+        {
+            if (_viewer)
+            {
+                if (auto handler = previous->eventHandler())
+                {
+                    auto& handlers = _viewer->getEventHandlers();
+                    handlers.erase(std::remove(handlers.begin(), handlers.end(), handler), handlers.end());
+                }
+            }
+            previous->detach();
+        }
+        _sceneRoot->children.clear();
+        _sceneRoot->addChild(_view->assembleScene(_world, viewportAspect()));
+        installView(&carryOver);
+
+        // layers of the old frame are dropped; the same sources reload on worker threads in the new one
+        if (_asyncLoader) _retiredLoaders.push_back(std::move(_asyncLoader));
+        startAsyncLoader();
+        for (const LayerSource& source : sources) _pendingLayerLoads.push_back(source);
+        _lastLayerError.clear();
+        if (onViewSwitched) onViewSwitched(*_view);
+        return true;
     }
 
     void ViewerApp::frameNode(vsg::ref_ptr<vsg::Node> node)
     {
-        if (!node || !_projection) return;
+        if (!node) return;
         const vsg::dbox bounds = computeGeometryBounds(*node);
-        if (!bounds.valid()) return;
-        if (_mapNavigation)
-        {
-            const CameraPose pose = _projection->framingPose(bounds, 90.0);
-            _mapNavigation->setMapCamera(MapCamera{{pose.centre.x, pose.centre.y}, pose.eye.z - _mapNavigation->settings().groundHeight});
-            return;
-        }
-        if (_globeNavigation)
-        {
-            const CameraPose pose = _projection->framingPose(bounds, _settings.framingElevationDegrees);
-            _globeNavigation->setGlobeCamera(globeCameraFromLookAt(pose.eye, pose.centre, pose.up, *_projection));
-            return;
-        }
-        applyPose(_projection->framingPose(bounds, _settings.framingElevationDegrees));
-    }
-
-    void ViewerApp::setUnderlay(vsg::ref_ptr<vsg::MatrixTransform> underlay, double depthFraction)
-    {
-        _underlay = underlay;
-        _underlayDepthFraction = depthFraction;
-    }
-
-    void ViewerApp::applyPose(const CameraPose& pose)
-    {
-        if (!_lookAt || !_perspective) return;
-        _lookAt->eye = pose.eye;
-        _lookAt->center = pose.centre;
-        _lookAt->up = pose.up;
-        _perspective->nearDistance = pose.nearPlane;
-        _perspective->farDistance = pose.farPlane;
+        if (bounds.valid()) _view->frame(bounds);
     }
 
     void ViewerApp::frameScene()
     {
-        if (_mapNavigation)
-        {
-            _mapNavigation->home();
-            return;
-        }
-        if (_globeNavigation)
-        {
-            _globeNavigation->home();
-            return;
-        }
-        applyPose(_projection->framingPose(_bounds, _settings.framingElevationDegrees));
+        _view->home();
     }
 
     double ViewerApp::zoomLevel() const
     {
-        if (_mapNavigation) return _mapNavigation->zoomLevel();
-        if (_globeNavigation) return _globeNavigation->zoomLevel();
-        return 0.0;
+        return _view->state().zoomLevel;
+    }
+
+    ViewState ViewerApp::viewState() const
+    {
+        return _view->state();
     }
 
     void ViewerApp::lookAt(const GeoPoint& target, double altitudeMetres)
     {
-        const vsg::dvec3 centre = _projection->geoToWorld(target);
-        if (_mapNavigation)
-        {
-            _mapNavigation->setMapCamera(MapCamera{{centre.x, centre.y}, altitudeMetres});
-            return;
-        }
-        if (_globeNavigation)
-        {
-            GlobeCamera camera;
-            camera.longitude = target.longitude;
-            camera.latitude = target.latitude;
-            camera.altitude = altitudeMetres;
-            _globeNavigation->setGlobeCamera(camera); // straight down, north up
-            return;
-        }
-        const vsg::dvec3 up = _projection->upVector(centre);
-
-        CameraPose pose;
-        pose.centre = centre;
-        pose.eye = centre + up * altitudeMetres;
-        // Looking along -up, so the screen "up" must be perpendicular to it: north on a map, the
-        // earth's axis (projected) on a globe, east when that degenerates.
-        vsg::dvec3 screenUp = _projection->geocentric() ? vsg::dvec3(0.0, 0.0, 1.0) : vsg::dvec3(0.0, 1.0, 0.0);
-        screenUp = screenUp - up * vsg::dot(screenUp, up);
-        pose.up = (vsg::length(screenUp) > 1e-6) ? vsg::normalize(screenUp) : vsg::dvec3(1.0, 0.0, 0.0);
-        pose.nearPlane = std::max(1.0, altitudeMetres * 0.0005);
-        pose.farPlane = altitudeMetres * 10.0 + summarize(_bounds).radius;
-        applyPose(pose);
+        _view->lookAt(target, altitudeMetres);
     }
+
+    // ---- frame loop ------------------------------------------------------------------------------
 
     bool ViewerApp::frame()
     {
@@ -268,17 +434,11 @@ namespace ivevsg
         if (!_viewer->advanceToNextFrame()) return false;
 
         _viewer->handleEvents();
-        // hand queued layer loads to worker threads once the viewer can compile, and merge finished ones
-        if (!_pendingLayerLoads.empty() && _loader && _viewer->compileManager)
+
+        // hand queued layer loads to worker threads, and merge finished ones
+        if (!_pendingLayerLoads.empty() && _asyncLoader)
         {
-            if (!_asyncLoader)
-            {
-                vsg::ref_ptr<vsg::Viewer> viewer = _viewer;
-                _asyncLoader = std::make_unique<AsyncLayerLoader>(_loader, [viewer](vsg::ref_ptr<vsg::Node> node) {
-                    return viewer->compileManager->compile(node); // CompileManager is thread safe
-                });
-            }
-            for (const auto& [path, name] : _pendingLayerLoads) _asyncLoader->request(path, name);
+            for (const LayerSource& source : _pendingLayerLoads) _asyncLoader->request(source);
             _pendingLayerLoads.clear();
         }
         if (_asyncLoader)
@@ -288,7 +448,13 @@ namespace ivevsg
                 if (outcome.ok())
                 {
                     if (outcome.compileResult) vsg::updateViewer(*_viewer, outcome.compileResult); // main thread: registers pager/descriptor needs
-                    if (_layers) _layers->addLayer(outcome.name, outcome.node);
+                    Layer layer;
+                    layer.name = outcome.name;
+                    layer.node = outcome.node;
+                    layer.source = outcome.source;
+                    layer.sourceCrs = outcome.sourceCrs;
+                    layer.targetCrs = outcome.targetCrs;
+                    if (_layers) _layers->addLayer(std::move(layer));
                     _lastLayerError.clear();
                 }
                 else
@@ -299,29 +465,36 @@ namespace ivevsg
                 if (onLayerLoaded) onLayerLoaded(outcome.name, outcome.ok(), outcome.error, outcome.seconds);
             }
         }
+        // loads started for a view that is gone finish on their threads and are thrown away
+        for (auto it = _retiredLoaders.begin(); it != _retiredLoaders.end();)
         {
-            double altitude = 1.0;
-            if (_mapNavigation) altitude = _mapNavigation->mapCamera().altitude;
-            else if (_globeNavigation) altitude = _globeNavigation->globeCamera().altitude;
-            else if (_lookAt && _projection) altitude = std::max(1.0, _projection->worldToGeo(_lookAt->eye).altitude);
+            (*it)->takeCompleted();
+            it = ((*it)->pendingCount() == 0) ? _retiredLoaders.erase(it) : it + 1;
+        }
+
+        const ViewState state = _view->state();
+        {
+            const double altitude = std::max(1.0, state.altitude);
+            const Projection& projection = *_view->projection();
             // keep the underlay a fixed fraction of the eye height below the data surface (z on a map,
             // radially on a globe) ...
-            if (_underlay && _projection) _underlay->matrix = _projection->layerOffsetTransform(-std::max(1.0, altitude * _underlayDepthFraction));
+            if (_underlay) _underlay->matrix = projection.layerOffsetTransform(-std::max(1.0, altitude * underlayDepthFraction));
             // ... and each further data layer a little above the previous one, so overlaps never z-fight
-            if (_layers && _projection)
+            if (_layers)
             {
                 for (std::size_t i = 1; i < _layers->layerCount(); ++i)
-                    _layers->setLayerOffset(i, _projection->layerOffsetTransform(std::max(0.5, altitude * layerSeparationFraction) * static_cast<double>(i)));
+                    _layers->setLayerOffset(i, projection.layerOffsetTransform(std::max(0.5, altitude * layerSeparationFraction) * static_cast<double>(i)));
             }
         }
-        if (_mapNavigation && onMapViewChanged)
+        if (onViewChanged)
         {
-            const MapCamera& camera = _mapNavigation->mapCamera();
-            if (!_reportedOnce || camera.centre.x != _lastReportedCamera.centre.x || camera.centre.y != _lastReportedCamera.centre.y || camera.altitude != _lastReportedCamera.altitude)
+            const ViewState& last = _lastReportedState;
+            if (!_reportedOnce || state.centre.longitude != last.centre.longitude || state.centre.latitude != last.centre.latitude ||
+                state.altitude != last.altitude || state.heading != last.heading || state.tilt != last.tilt)
             {
-                _lastReportedCamera = camera;
+                _lastReportedState = state;
                 _reportedOnce = true;
-                onMapViewChanged(camera, zoomLevel());
+                onViewChanged(state);
             }
         }
         _viewer->update();

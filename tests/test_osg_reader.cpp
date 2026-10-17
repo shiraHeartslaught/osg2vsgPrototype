@@ -2,6 +2,7 @@
 #include <ivevsg/SceneLoader.h>
 
 #include <gtest/gtest.h>
+#include <osg/CoordinateSystemNode>
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/Group>
@@ -120,4 +121,19 @@ TEST(OsgReader, SceneLoaderUsesItAheadOfVsgXchangeAndByteColoursBecomeAVsgColour
     EXPECT_EQ(census.vec4Arrays, 1) << "the byte colours must arrive as a bound float colour array";
 
     std::filesystem::remove(file);
+}
+
+TEST(OsgReader, ACoordinateSystemNodeWithAnEllipsoidModelMeansGeocentric)
+{
+    osg::ref_ptr<osg::CoordinateSystemNode> geocentric = new osg::CoordinateSystemNode;
+    geocentric->setCoordinateSystem("GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563]]]");
+    geocentric->setEllipsoidModel(new osg::EllipsoidModel);
+    EXPECT_EQ(ivevsg::OsgReader::declaredCrs(*geocentric), "EPSG:4978");
+
+    osg::ref_ptr<osg::CoordinateSystemNode> flat = new osg::CoordinateSystemNode;
+    flat->setCoordinateSystem("EPSG:3857");
+    EXPECT_EQ(ivevsg::OsgReader::declaredCrs(*flat), "EPSG:3857");
+
+    osg::ref_ptr<osg::Group> none = new osg::Group;
+    EXPECT_TRUE(ivevsg::OsgReader::declaredCrs(*none).empty());
 }
