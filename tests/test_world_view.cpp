@@ -189,3 +189,76 @@ TEST(WorldViewCamera, TrackballViewReportsItsLookAt)
     auto world = vsg::Group::create();
     EXPECT_EQ(view.assembleScene(world, 2.0), world); // no wrapping: the node itself
 }
+
+namespace
+{
+    /// What ViewerApp::installView does on a switch: attach the new view, then look at the old view's
+    /// centre from its altitude and restore its orientation where the new view has one.
+    void handOver(ivevsg::WorldView& from, ivevsg::WorldView& to, vsg::ref_ptr<vsg::Camera> camera)
+    {
+        const ivevsg::ViewState state = from.state();
+        from.detach();
+        to.attach(camera, patchBounds(*to.projection()), 90.0);
+        to.lookAt(state.centre, state.altitude);
+        if (to.hasOrientation()) to.setOrientation(state.heading, state.tilt);
+    }
+} // namespace
+
+TEST(WorldViewCamera, SwitchingKeepsLonLatAltitudeAndZoomInBothDirections)
+{
+    struct Case
+    {
+        double lon, lat, altitude, heading, tilt;
+    };
+    const Case cases[] = {
+        {33.2, 35.1, 2.0e5, 0.0, 0.0},       // zoomed in
+        {-122.4, 37.8, 1.5e6, 30.0, 40.0},   // tilted and turned on the globe
+        {-170.0, 10.0, 3.0e6, 0.0, 0.0},     // next to the antimeridian
+        {20.0, 79.2, 2.5e6, 0.0, 0.0},       // near the Mercator latitude limit
+        {100.0, -30.0, 2.0e7, 0.0, 0.0},     // whole globe in view
+    };
+    for (const Case& c : cases)
+    {
+        auto camera = makeCamera();
+        ivevsg::GlobeView globe;
+        globe.attach(camera, patchBounds(*globe.projection()), 90.0);
+        globe.lookAt(ivevsg::GeoPoint{c.lon, c.lat, 0.0}, c.altitude);
+        globe.setOrientation(c.heading, c.tilt);
+        const ivevsg::ViewState onGlobe = globe.state();
+        ASSERT_NEAR(onGlobe.centre.longitude, c.lon, 1e-9);
+        ASSERT_NEAR(onGlobe.centre.latitude, c.lat, 1e-9);
+
+        // globe -> map: same ground under the screen centre, same altitude, same zoom and resolution
+        ivevsg::MercatorView mercator;
+        handOver(globe, mercator, camera);
+        const ivevsg::ViewState onMap = mercator.state();
+        EXPECT_NEAR(onMap.centre.longitude, c.lon, 1e-9) << "lon " << c.lon;
+        EXPECT_NEAR(onMap.centre.latitude, c.lat, 1e-9) << "lat " << c.lat;
+        EXPECT_NEAR(onMap.altitude, c.altitude, 1e-6);
+        EXPECT_NEAR(onMap.zoomLevel, onGlobe.zoomLevel, 1e-9);
+        EXPECT_NEAR(onMap.metersPerPixel, onGlobe.metersPerPixel, 1e-9);
+
+        // map -> globe: back to the same place, straight down with north up (a map has no tilt to carry)
+        ivevsg::GlobeView again;
+        handOver(mercator, again, camera);
+        const ivevsg::ViewState back = again.state();
+        EXPECT_NEAR(back.centre.longitude, c.lon, 1e-9);
+        EXPECT_NEAR(back.centre.latitude, c.lat, 1e-9);
+        EXPECT_NEAR(back.altitude, c.altitude, 1e-6);
+        EXPECT_NEAR(back.heading, 0.0, 1e-9);
+        EXPECT_NEAR(back.tilt, 0.0, 1e-9);
+    }
+}
+
+TEST(WorldViewCamera, AWrappedMercatorCameraHandsOverANormalisedLongitude)
+{
+    auto camera = makeCamera();
+    ivevsg::MercatorView mercator;
+    mercator.attach(camera, patchBounds(*mercator.projection()), 90.0);
+    mercator.lookAt(ivevsg::GeoPoint{190.0, 10.0, 0.0}, 3.0e6); // past the antimeridian: wraps to -170
+    EXPECT_NEAR(mercator.state().centre.longitude, -170.0, 1e-9);
+    ivevsg::GlobeView globe;
+    handOver(mercator, globe, camera);
+    EXPECT_NEAR(globe.state().centre.longitude, -170.0, 1e-9);
+    EXPECT_NEAR(globe.state().centre.latitude, 10.0, 1e-9);
+}

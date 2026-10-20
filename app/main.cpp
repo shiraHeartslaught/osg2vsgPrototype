@@ -162,7 +162,8 @@ int main(int argc, char** argv)
     app.onViewSwitched = [&](const ivevsg::WorldView& current) {
         std::cout << "Display: " << current.name() << "  base: " << app.baseInfo().kind
                   << (app.baseInfo().present ? " native " + app.baseInfo().sourceCrs + (app.baseInfo().targetCrs.empty() ? " shown as read" : " -> " + app.baseInfo().targetCrs) : "")
-                  << "; reloading " << app.loadingLayers().size() << " layer(s)\n";
+                  << "; reloading " << app.loadingLayers().size() << " layer(s); zoom range "
+                  << current.minZoomLevel() << " .. " << current.maxZoomLevel() << "\n";
         lastReportedQuarterLevel = -1000;
     };
     if (settings.ui)
@@ -180,7 +181,7 @@ int main(int argc, char** argv)
     const ivevsg::GeoExtent extent = app.projection().extentOf(app.sceneBounds());
     std::cout << "Start extent: lon [" << extent.minLongitude << ", " << extent.maxLongitude << "]"
               << " lat [" << extent.minLatitude << ", " << extent.maxLatitude << "]\n";
-    app.view().setZoomLevelRange(minZoom, maxZoom);
+    app.setZoomLevelRange(minZoom, maxZoom); // kept for every view switched to
     if (startZoom > maxZoom) std::cout << "Note: --zoom " << startZoom << " is above --max-zoom " << maxZoom << ", clamping\n";
     if (haveCenter || startZoom >= 0.0)
     {
@@ -207,10 +208,7 @@ int main(int argc, char** argv)
     {
         while (app.frame())
         {
-            if (app.frameCount() == switchFrame)
-            {
-                if (!app.switchView(switchTo)) std::cerr << "switch failed: " << app.error() << "\n";
-            }
+            if (app.frameCount() == switchFrame) app.requestViewSwitch(switchTo); // applied at the start of the next frame
         }
     }
     catch (const vsg::Exception& e)

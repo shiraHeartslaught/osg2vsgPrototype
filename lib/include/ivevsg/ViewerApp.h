@@ -112,6 +112,13 @@ namespace ivevsg
         /// at the same altitude. Returns false (and keeps the current view) when the new base cannot load.
         bool switchView(std::unique_ptr<WorldView> view);
         bool switchView(const std::string& viewKey);
+        /// Switches at the start of the next frame. This is the form for UI code: panels are drawn
+        /// while the frame is being recorded, so a switch made from one would rebuild the scene
+        /// mid-record and destroy the view the panel is still reading. A failure is reported through
+        /// lastSwitchError().
+        void requestViewSwitch(const std::string& viewKey);
+        bool viewSwitchPending() const { return !_pendingViewKey.empty(); }
+        const std::string& lastSwitchError() const { return _lastSwitchError; }
         std::function<void(const WorldView& view)> onViewSwitched;
 
         WorldView& view() { return *_view; }
@@ -122,6 +129,8 @@ namespace ivevsg
         void frameNode(vsg::ref_ptr<vsg::Node> node); // frame one layer
         void lookAt(const GeoPoint& target, double altitudeMetres);
         double zoomLevel() const;
+        /// Zoom limits, kept and applied to every view the app switches to.
+        void setZoomLevelRange(double minZoomLevel, double maxZoomLevel);
         ViewState viewState() const;
         /// Called from frame() whenever the view's state changed.
         std::function<void(const ViewState& state)> onViewChanged;
@@ -160,6 +169,10 @@ namespace ivevsg
         std::map<std::string, BaseSource> _baseSources;
         BaseInfo _baseInfo;
         std::vector<LayerSource> _startupLayers; // added before initialize()
+        std::string _pendingViewKey;             // requestViewSwitch(), applied in frame()
+        bool _haveZoomRange = false;
+        double _minZoomLevel = 0.0, _maxZoomLevel = 28.0;
+        std::string _lastSwitchError;
 
         vsg::ref_ptr<vsg::Viewer> _viewer;
         vsg::ref_ptr<vsg::Window> _window;

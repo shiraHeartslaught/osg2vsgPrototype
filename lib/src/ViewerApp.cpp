@@ -209,6 +209,7 @@ namespace ivevsg
     {
         if (!_viewer || !_camera) return;
         _view->attach(_camera, _bounds, _settings.framingElevationDegrees);
+        if (_haveZoomRange) _view->setZoomLevelRange(_minZoomLevel, _maxZoomLevel);
         if (carryOver)
         {
             _view->lookAt(carryOver->centre, carryOver->altitude);
@@ -320,6 +321,11 @@ namespace ivevsg
         return true;
     }
 
+    void ViewerApp::requestViewSwitch(const std::string& viewKey)
+    {
+        _pendingViewKey = viewKey;
+    }
+
     bool ViewerApp::switchView(const std::string& viewKey)
     {
         std::unique_ptr<WorldView> view = createWorldView(viewKey, _settings.views);
@@ -425,6 +431,14 @@ namespace ivevsg
         _view->lookAt(target, altitudeMetres);
     }
 
+    void ViewerApp::setZoomLevelRange(double minZoomLevel, double maxZoomLevel)
+    {
+        _haveZoomRange = true;
+        _minZoomLevel = minZoomLevel;
+        _maxZoomLevel = maxZoomLevel;
+        _view->setZoomLevelRange(minZoomLevel, maxZoomLevel);
+    }
+
     // ---- frame loop ------------------------------------------------------------------------------
 
     bool ViewerApp::frame()
@@ -434,6 +448,19 @@ namespace ivevsg
         if (!_viewer->advanceToNextFrame()) return false;
 
         _viewer->handleEvents();
+
+        // a switch asked for from a panel during the last frame happens here, between frames
+        if (!_pendingViewKey.empty())
+        {
+            std::string key;
+            key.swap(_pendingViewKey);
+            _lastSwitchError.clear();
+            if (!switchView(key))
+            {
+                _lastSwitchError = _error;
+                std::cerr << "view switch to '" << key << "' failed: " << _error << "\n";
+            }
+        }
 
         // hand queued layer loads to worker threads, and merge finished ones
         if (!_pendingLayerLoads.empty() && _asyncLoader)

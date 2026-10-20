@@ -29,6 +29,8 @@ live together in one module, and the viewer holds exactly one of them at a time:
   tiles over the ellipsoid (8 x 8) when loading.
 - `TrackballView` — any projection with VSG's free orbit (`--trackball`), for inspection.
 
+The derivations behind every camera formula, with references, are in `docs/camera-maths.md`.
+
 `--projection` picks the start view; the panel's "Display projection" chooser switches at runtime
 (`ViewerApp::switchView`, or `--switch-at FRAME VIEW` for scripted runs). On a switch the viewer
 reads the old view's `ViewState` (centre, altitude, heading, tilt), builds the new view's scene with
@@ -201,6 +203,7 @@ so these drape the globe as read and reproject onto the Mercator map.
 - `tests/` — Google Test suite (`ctest` in the build directory, or CLion's test runner)
 - `data/` — base map image and the script that regenerates it (see `data/README.md`)
 - `docs/original_main.cpp.txt` — the monolithic proof of concept this grew from
+- `docs/camera-maths.md` — the maths behind the Mercator, globe and trackball cameras, with references
 
 ## Building
 

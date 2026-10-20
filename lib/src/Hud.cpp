@@ -43,12 +43,12 @@ namespace ivevsg
             double latitude = 0.0;
             double zoom = 2.0;
             double maxZoom = 22.0;
-            int viewChoice = -1;
+            std::string lastViewKey;
+            std::vector<std::string> viewNames; // one per worldViewKeys() entry
             int crsChoice = 0;
             std::array<char, 128> customCrs{};
             std::array<char, 1024> newLayerPath{};
             std::string dialogError;
-            std::string switchError;
             AsyncFileDialog dialog; // runs the system picker on a worker thread; polled every frame
         };
 
@@ -86,45 +86,46 @@ namespace ivevsg
                 return true;
             }
             ViewerApp& app = *context.app;
-            WorldView& view = app.view();
+            // The view object is replaced when the projection switches, so take what the panel needs
+            // from it as values and ask the app to switch between frames rather than switching here.
+            WorldView& current = app.view();
+            const std::string currentKey = current.key();
+            const std::string currentName = current.name();
+            if (state->lastViewKey != currentKey)
+            {
+                state->lastViewKey = currentKey;
+                state->initialised = false; // a new view: re-read the go-to fields from it
+            }
 
             // ---- display projection ----
             const std::vector<std::string> keys = worldViewKeys();
-            if (state->viewChoice < 0)
+            if (state->viewNames.size() != keys.size())
             {
-                for (std::size_t i = 0; i < keys.size(); ++i)
-                    if (keys[i] == view.key()) state->viewChoice = static_cast<int>(i);
+                state->viewNames.clear();
+                for (const std::string& key : keys)
+                {
+                    std::unique_ptr<WorldView> candidate = createWorldView(key);
+                    state->viewNames.push_back(candidate ? candidate->name() : key);
+                }
             }
             ImGui::TextDisabled("Display projection");
             ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::BeginCombo("##display", view.name().c_str()))
+            const bool switching = app.viewSwitchPending();
+            ImGui::BeginDisabled(switching);
+            if (ImGui::BeginCombo("##display", switching ? "switching..." : currentName.c_str()))
             {
                 for (std::size_t i = 0; i < keys.size(); ++i)
                 {
-                    std::unique_ptr<WorldView> candidate = createWorldView(keys[i]);
-                    const std::string label = candidate ? candidate->name() : keys[i];
-                    const bool selected = keys[i] == view.key();
-                    if (ImGui::Selectable(label.c_str(), selected) && !selected)
-                    {
-                        state->switchError.clear();
-                        if (app.switchView(keys[i]))
-                        {
-                            state->viewChoice = static_cast<int>(i);
-                            state->initialised = false; // re-read the go-to fields from the new view
-                        }
-                        else
-                        {
-                            state->switchError = app.error();
-                        }
-                    }
+                    const bool selected = keys[i] == currentKey;
+                    if (ImGui::Selectable(state->viewNames[i].c_str(), selected) && !selected) app.requestViewSwitch(keys[i]);
                     if (selected) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
             }
-            if (!state->switchError.empty()) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", state->switchError.c_str());
+            ImGui::EndDisabled();
+            if (!app.lastSwitchError().empty()) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", app.lastSwitchError().c_str());
 
             // ---- the view ----
-            WorldView& current = app.view(); // may have just changed
             const ViewState vs = current.state();
             if (!state->initialised)
             {
@@ -175,7 +176,7 @@ namespace ivevsg
             const double zoomFloor = 0.0, zoomCeiling = 28.0;
             if (ImGui::SliderScalar("Max zoom", ImGuiDataType_Double, &state->maxZoom, &zoomFloor, &zoomCeiling, "%.0f"))
             {
-                current.setZoomLevelRange(current.minZoomLevel(), state->maxZoom);
+                app.setZoomLevelRange(current.minZoomLevel(), state->maxZoom); // remembered across view switches
             }
             for (const std::string& line : current.controls()) ImGui::TextDisabled("%s", line.c_str());
 
