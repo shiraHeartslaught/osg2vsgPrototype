@@ -190,6 +190,11 @@ namespace ivevsg
         std::vector<LayerSource> _pendingLayerLoads; // queued until the viewer can compile
         std::unique_ptr<AsyncLayerLoader> _asyncLoader;
         std::vector<std::unique_ptr<AsyncLayerLoader>> _retiredLoaders; // loads of a previous view, drained and dropped
+        /// Nodes taken out of the scene stay alive for a few frames before they are released: the
+        /// GPU may still be executing a frame that binds their pipelines and textures.
+        static constexpr int kRetireFrames = 8;
+        std::vector<std::pair<int, vsg::ref_ptr<vsg::Object>>> _retiredNodes;
+        void retire(vsg::ref_ptr<vsg::Object> node);
         std::string _lastLayerError;
 
         vsg::dbox _bounds;

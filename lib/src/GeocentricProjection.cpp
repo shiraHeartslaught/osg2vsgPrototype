@@ -34,6 +34,13 @@ namespace ivevsg
         // Bowring's closed form as the starting point (exact on the surface, a few 1e-7 degrees off
         // at 20 000 km up), then a few fixed-point iterations to converge everywhere
         const double p = std::sqrt(w.x * w.x + w.y * w.y);
+        if (p < 1e-9 && std::abs(w.z) < 1e-9)
+        {
+            // the centre of the earth has no direction: the bounds of whole-earth data land here
+            GeoPoint centre;
+            centre.altitude = -kB;
+            return centre;
+        }
         const double theta = std::atan2(w.z * kA, p * kB);
         const double sinT = std::sin(theta), cosT = std::cos(theta);
         double lat = std::atan2(w.z + kEp2 * kB * sinT * sinT * sinT, p - kE2 * kA * cosT * cosT * cosT);
@@ -45,6 +52,7 @@ namespace ivevsg
             n = kA / std::sqrt(1.0 - kE2 * sinLat * sinLat);
             altitude = (std::abs(cosLat) > 1e-10) ? p / cosLat - n : std::abs(w.z) - kB;
             if (std::abs(cosLat) <= 1e-10) break;
+            if (std::abs(n + altitude) < 1e-6) break; // on the axis inside the ellipsoid: the iteration has nothing to refine
             lat = std::atan2(w.z, p * (1.0 - kE2 * n / (n + altitude)));
         }
         GeoPoint geo;

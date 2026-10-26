@@ -4,10 +4,16 @@
 //   ivetiler <source raster (EPSG:3857)> <output directory>
 //            [--max-level N] [--tile-size 256] [--detail-bias 1.0] [--threads N] [--uncompressed]
 //            [--detail-extent MINLON MINLAT MAXLON MAXLAT --detail-level N]
-//            [--geocentric [--globe-grid 8]]
+//            [--geocentric [--globe-grid 8]] [--format ive|vsgb|tms|xyz [--image-ext png|jpg] [--texture bc1|rgba]]
 //
 // --geocentric writes the tile geometry on the WGS84 ellipsoid in EPSG:4978 metres (each tile an N x N
 // grid) instead of the flat Mercator plane, for data sets that live on the globe natively.
+// --format vsgb writes the same pyramid as VSG native files (root.vsgb, z/x/y.vsgb): geometry ready to
+// draw, textures BC1 compressed with mip chains (an eighth of RGBA; --texture rgba keeps them raw for
+// small sets where quality matters more than size), the CRS recorded in root.vsgb.
+// --format tms / xyz writes plain tile images (png with alpha, or jpg) in a z/x/y tree instead of .ive
+// files: TMS counts rows from the south and adds tilemapresource.xml, XYZ counts from the north. The
+// viewer builds the geometry for those itself, flat or on the globe (--geocentric is ignored).
 //
 // Output: <out>/root.ive plus <out>/z/x/y.ive holding the four children of tile z/x/y (TileSetBuilder.h).
 // Files are zlib-compressed unless --uncompressed is given. --detail-extent/--detail-level generate a
@@ -44,6 +50,31 @@ int main(int argc, char** argv)
         else if (arg == "--geocentric" || arg == "--ecef") settings.geocentric = true;
         else if (arg == "--globe-grid") settings.geocentricGrid = std::atoi(next("--globe-grid"));
         else if (arg == "--compressed") settings.compressed = true;
+        else if (arg == "--format")
+        {
+            const std::string format = next("--format");
+            if (format == "ive") settings.format = ivevsg::TileSetFormat::Ive;
+            else if (format == "vsgb" || format == "vsg") settings.format = ivevsg::TileSetFormat::Vsgb;
+            else if (format == "tms") settings.format = ivevsg::TileSetFormat::Tms;
+            else if (format == "xyz") settings.format = ivevsg::TileSetFormat::Xyz;
+            else
+            {
+                std::cerr << "--format must be ive, tms or xyz\n";
+                return 1;
+            }
+        }
+        else if (arg == "--image-ext") settings.imageExtension = next("--image-ext");
+        else if (arg == "--texture")
+        {
+            const std::string texture = next("--texture");
+            if (texture == "bc1") settings.compressTextures = true;
+            else if (texture == "rgba") settings.compressTextures = false;
+            else
+            {
+                std::cerr << "--texture must be bc1 or rgba\n";
+                return 1;
+            }
+        }
         else if (arg == "--detail-level") settings.detailMaxLevel = std::atoi(next("--detail-level"));
         else if (arg == "--detail-extent")
         {
@@ -67,7 +98,7 @@ int main(int argc, char** argv)
     {
         std::cerr << "usage: ivetiler <source raster (EPSG:3857)> <output directory> [--max-level N] [--tile-size 256] [--detail-bias 1.0]\n"
                      "                [--threads N] [--uncompressed] [--detail-extent MINLON MINLAT MAXLON MAXLAT --detail-level N]\n"
-                     "                [--geocentric [--globe-grid 8]]\n";
+                     "                [--geocentric [--globe-grid 8]] [--format ive|vsgb|tms|xyz [--image-ext png|jpg] [--texture bc1|rgba]]\n";
         return 1;
     }
     settings.sourceRaster = positional[0];
@@ -96,6 +127,7 @@ int main(int argc, char** argv)
     ivevsg::TileScheme scheme;
     scheme.tileSizePixels = settings.tileSizePixels;
     std::cout << "root:            " << report.rootFile << "\n"
+              << "layout:          " << report.layout << (report.layout == "ive" ? " (OpenSceneGraph files paged by VSG)" : report.layout == "vsgb" ? (settings.compressTextures ? " (VSG native files, BC1 textures with mip chains)" : " (VSG native files, RGBA textures)") : " (" + settings.imageExtension + " tile images, geometry made by the viewer)") << "\n"
               << "frame:           " << report.crs << (settings.geocentric ? " (WGS84 ellipsoid, " + std::to_string(settings.geocentricGrid) + " x " + std::to_string(settings.geocentricGrid) + " grid per tile)" : " (flat Web Mercator plane)") << "\n"
               << "source:          " << report.sourceMetersPerPixel << " m/px\n"
               << "levels:          0.." << report.maxLevel << " everywhere (level " << report.maxLevel << " = " << scheme.metersPerPixel(report.maxLevel) << " m/px)";

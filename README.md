@@ -110,6 +110,78 @@ screen is always covered, and the camera stops the moment the map's top or botto
 is capped at the altitude where the whole map height just fits. Both rules come from
 `Projection::viewLimits()` and `Projection::wrapWidth()`, so other projections are unaffected.
 
+## Other data: GeoTIFF, TMS / XYZ tile sets, VSG native files
+
+Every file the viewer shows goes through one `vsg::ReaderWriter` chain (`SceneLoader`), and each
+reader places what it reads in the current display frame, so all of these work on the Mercator map
+and on the globe alike, as layers (`--layer`, the panel's Browse / Tile folder buttons, or a typed
+path) or as a base map (`--base-tiles` / `--globe-tiles`):
+
+| Data | Reader | How it is placed |
+|---|---|---|
+| `.ive`, `.osgb`, `.osgt`, `.osg` | `OsgReader` | reprojected from the CRS the file declares (or the override / default) |
+| `.vsgb`, `.vsgt` (single files, or `ivetiler --format vsgb` pyramids) | `VsgSceneReader` | reprojected by `VsgReproject` from the CRS tagged in the file (or the override / default); paged children inherit it |
+| GeoTIFF, JPEG 2000, VRT, ERDAS `.img`, ... (anything GDAL reads, by extension) | `TileLayerReader` + `RasterTileSource` | warped by GDAL into WebMercatorQuad tiles on demand, from its own CRS or the override |
+| TMS directory (`tilemapresource.xml`), XYZ directory, `{z}/{x}/{y}.png` template | `TileLayerReader` + `DirectoryTileSource` | tile images read as they are; EPSG:3857 or EPSG:4326 grids |
+
+**Rasters and tile sets** become a quadtree of `vsg::PagedLOD` nodes whose children have virtual
+names (`ivevsg-tile://<layer>/z/x/y`) that the database pager hands back to `TileLayerReader`, so a
+100 000 pixel GeoTIFF pages exactly like a pre-built `.ive` pyramid and nothing is cut in advance.
+Each tile is a textured grid: one quad on the Mercator plane when the tiles are Mercator, an 8 x 8 grid
+following the surface otherwise (a geodetic TMS on the map, anything on the globe). Textures are RGBA:
+the raster's alpha band, its nodata value and everything outside its footprint are transparent, so a
+regional GeoTIFF sits cleanly on the base map. The tile hand-over threshold is the same as the
+`.ive` pyramids use (`subdivisionPixelThreshold`, `LoaderSettings::detailBias`).
+
+Notes and limits:
+
+- A raster must be georeferenced and name a CRS; one that names none is loaded with the native CRS
+  chosen in the panel (or `--layer-crs`). Colour-table images are expanded to RGBA; 16-bit data is
+  truncated to 8 bits.
+- Large rasters should carry overviews (`gdaladdo -r average file.tif 2 4 8 16 ...`); without them
+  the coarse tiles read the whole file. The panel's tooltip and the log say "(no overviews)".
+- Tiling is always WebMercatorQuad, so data beyond +-85.05 degrees is not shown, on the globe either
+  (the same holds for the `.ive` pyramids).
+- `tilemapresource.xml` is read for the SRS, origin, tile size, bounding box and levels; a directory
+  without one is taken as XYZ (rows from the north, EPSG:3857) and its levels are scanned. A template
+  may use `{-y}` for TMS row numbering.
+- VSG native files carry their CRS as a value on the root node (`ivevsg.crs`, see `tagCrs()`);
+  `ivevsgconv` writes it when converting:
+
+```
+ivevsgconv <input.ive|.osgb|.tif|...> <output.vsgb|.vsgt> [--crs EPSG:xxxx] [--source-crs EPSG:xxxx] [--target EPSG:xxxx]
+```
+
+  `--target` reprojects into a display frame before writing (the output is then tagged with it),
+  which is also a handy way to inspect what the loader does to a file: write a `.vsgt` and read it.
+
+  Only the file named is converted; a paged database's children stay as they are and are found
+  through the absolute paths VSG records, so keep the output next to the input. Files from other
+  tools (`vsgconv`) have no tag and are taken as the loader default (`--source-crs`) unless a
+  native CRS is chosen when adding them.
+
+### Changing data at runtime
+
+Layers of any format can be added, removed and reloaded into the other projection while the
+viewer renders and pages. Two rules keep that crash-free:
+
+- A node taken out of the scene (a removed layer, the whole scene on a view switch) is kept for a
+  few frames (`ViewerApp::kRetireFrames`) before it is released, because a frame already
+  submitted to the GPU may still bind its pipelines and textures. Without this the Vulkan
+  validation layer reports `vkDestroyPipeline` / `vkDestroyImageView` on objects in use.
+- A tile layer (raster or tile directory) lives exactly as long as the node it was read into; the
+  reader only keeps a weak reference, so removing the layer closes its raster, and a child request
+  that the pager issues afterwards is answered with a read error rather than served from freed
+  memory. Layer ids are unique across readers and views.
+
+`ive_poc --script FILE` runs a scenario unattended for checking this (one `FRAME ACTION ARGS` per
+line: `add PATH [CRS]`, `remove INDEX|all`, `switch VIEW`, `goto LON LAT ZOOM`, `home`, `quit`).
+Run it with `--debug` for the validation layer, or with an AddressSanitizer build
+(`cmake -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS=-fsanitize=address
+-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address`, then `ASAN_OPTIONS=detect_leaks=0`). A scenario that
+adds every format, switches views six times and removes layers while their tiles are still paging
+passes both.
+
 ## Tiled base map (OGC WebMercatorQuad as .ive)
 
 `ivetiler` cuts any EPSG:3857 raster into the OGC WebMercatorQuad pyramid (256 px tiles, level 0 =
@@ -119,7 +191,7 @@ by level of detail:
 ```
 ivetiler <source.tif (EPSG:3857)> <out dir> [--max-level N] [--tile-size 256] [--detail-bias 1.0]
          [--threads N] [--uncompressed] [--detail-extent MINLON MINLAT MAXLON MAXLAT --detail-level N]
-         [--geocentric [--globe-grid 8]]
+         [--geocentric [--globe-grid 8]] [--format ive|vsgb|tms|xyz [--image-ext png|jpg] [--texture bc1|rgba]]
 ive_poc --base-tiles <out dir>/root.ive [scene.ive] [--log-loads]
 ive_poc --projection globe --globe-tiles <ecef out dir>/root.ive
 ```
@@ -158,6 +230,26 @@ The base layer hangs under an "underlay" transform that the viewer keeps a small
 data plane, scaled with the camera altitude (2% of it). A fixed offset cannot work across zoom levels:
 400 km is invisible at zoom 2 but at zoom 14 the camera is only 18 km up, so the base tiles would be
 drawn and LOD-selected as if viewed from zoom 9.5.
+
+`--format vsgb` writes the same pyramid as VSG native files (`root.vsgb`, `z/x/y.vsgb`): the tiles
+are ready to draw (flat quads, or grids on the ellipsoid with `--geocentric`), their textures are BC1
+compressed with full mip chains (`TextureCompress.h`, an eighth of RGBA, so a global level 9 is about
+the size of the `.ive` set; `--texture rgba` keeps them uncompressed for small sets), and `root.vsgb`
+records the CRS so the viewer places the set without being told. The viewer shows it as read in its own frame and reprojects it, children included, in the
+other one. `--format tms` or `--format xyz` writes plain tile images instead (PNG with alpha outside
+the raster, or JPEG) in a `z/x/y` tree: TMS counts rows from the south and adds
+`tilemapresource.xml`, XYZ counts from the north. The viewer reads either tree directly (see "Other
+data" above), on the map or the globe, so `--geocentric` does not apply to them.
+
+The demo data sets built from the level-9 Blue Marble (`bluemarble_src/bluemarble_3857_131072.tif`,
+JPEG-in-TIFF with overviews, itself loadable directly as a GeoTIFF):
+
+```
+ivetiler bluemarble_3857_131072.tif bluemarble_ecef_l9      --geocentric --max-level 9        # .ive, 12 GB
+ivetiler bluemarble_3857_131072.tif bluemarble_vsgb_ecef_l9 --geocentric --max-level 9 --format vsgb
+ive_poc --projection globe --globe-tiles bluemarble_vsgb_ecef_l9/root.vsgb
+ive_poc --base-tiles bluemarble_src/bluemarble_3857_131072.tif          # the GeoTIFF as the map's base
+```
 
 ## VirtualPlanetBuilder geocentric databases
 
@@ -202,6 +294,11 @@ so these drape the globe as read and reproject onto the Mercator map.
 - `tools/ivetiler/` — tile pyramid generator
 - `tests/` — Google Test suite (`ctest` in the build directory, or CLion's test runner)
 - `data/` — base map image and the script that regenerates it (see `data/README.md`)
+- `lib/.../TileGrid`, `TileSource`, `TileLayerReader` — any-CRS tile matrix sets, GDAL raster and tile directory sources, and the reader that pages them as textured tiles in the display frame
+- `lib/.../VsgReproject` — reprojection of VSG scene graphs and the `.vsgb` / `.vsgt` reader that applies it
+- `lib/.../TileGeometry`, `TextureCompress` — textured tile meshes and their shared pipeline (used by the on-the-fly reader and the `vsgb` tiler), BC1 texture compression with mip chains
+- `lib/.../LoaderKeys.h` — the option keys the readers share (target / source CRS, tessellation, detail bias)
+- `tools/ivevsgconv/` — converts any readable scene to `.vsgb` / `.vsgt` with its CRS recorded
 - `docs/original_main.cpp.txt` — the monolithic proof of concept this grew from
 - `docs/camera-maths.md` — the maths behind the Mercator, globe and trackball cameras, with references
 

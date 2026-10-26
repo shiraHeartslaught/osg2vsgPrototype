@@ -10,8 +10,26 @@
 
 namespace ivevsg
 {
+    /// How a tile set is written: OpenSceneGraph .ive files paged by VSG; VSG native .vsgb files
+    /// (geometry ready to draw, textures BC1 compressed with mip chains, the CRS recorded in root.vsgb);
+    /// or plain tile images in a TMS (rows from the south, with tilemapresource.xml) or XYZ (rows from
+    /// the north) directory tree that the viewer reads through TileLayerReader.
+    enum class TileSetFormat
+    {
+        Ive,
+        Vsgb,
+        Tms,
+        Xyz
+    };
+
     struct TileSetSettings
     {
+        TileSetFormat format = TileSetFormat::Ive;
+        /// Image type for Tms / Xyz output: "png" (with alpha outside the raster) or "jpg".
+        std::string imageExtension = "png";
+        /// Vsgb output: BC1-compress the textures (an eighth of RGBA, with mip chains; slight blocking
+        /// in smooth gradients) rather than store them as RGBA8 with a mip chain made on the GPU.
+        bool compressTextures = true;
         /// Any GDAL-readable raster georeferenced in EPSG:3857 metres (e.g. the output of
         /// `gdalwarp -t_srs EPSG:3857`). It may cover part of the world; tiles outside it are skipped.
         std::string sourceRaster;
@@ -46,14 +64,15 @@ namespace ivevsg
 
     struct TileSetReport
     {
-        std::string rootFile;
+        std::string rootFile; // root.ive, root.vsgb, tilemapresource.xml, or the XYZ directory
+        std::string layout;   // "ive", "vsgb", "tms" or "xyz"
         std::string crs; // "EPSG:3857" or "EPSG:4978", also recorded in root.ive's CoordinateSystemNode
         int maxLevel = 0;
         int detailMaxLevel = 0;
         double sourceMetersPerPixel = 0.0;
         std::size_t filesPlanned = 0;
-        std::size_t filesWritten = 0; // .ive files
-        std::size_t tilesWritten = 0; // textured tile quads across all levels
+        std::size_t filesWritten = 0; // .ive files, or tile images
+        std::size_t tilesWritten = 0; // textured tiles across all levels (= filesWritten for image output)
         unsigned threads = 1;
         bool compressed = false;
         std::string error;
@@ -71,7 +90,8 @@ namespace ivevsg
     int subdivisionLimit(const TileIndex& tile, const TileSetSettings& settings, const TileScheme& scheme, int resolvedMaxLevel);
 
     /// Writes an OGC WebMercatorQuad pyramid as OpenSceneGraph .ive files that VSG pages in by level
-    /// of detail (through vsgXchange/osg2vsg):
+    /// of detail (through vsgXchange/osg2vsg), or with settings.format as VSG native .vsgb files of
+    /// the same layout (root.vsgb, z/x/y.vsgb), or as tile images:
     ///
     ///   root.ive   the level-0 tile; a PagedLOD that loads 0/0/0.ive when it grows too large on screen
     ///   z/x/y.ive  the four level-(z+1) children of tile z/x/y, each a textured quad in EPSG:3857 metres

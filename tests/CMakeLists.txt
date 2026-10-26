@@ -14,7 +14,11 @@ add_executable(ivevsg_tests
     test_scene_bounds.cpp
     test_scene_loader.cpp
     test_tile_scheme.cpp
+    test_texture_compress.cpp
+    test_tile_grid.cpp
+    test_tile_layer.cpp
     test_tile_set_builder.cpp
+    test_vsg_reproject.cpp
     test_world_view.cpp
 )
 find_package(GDAL CONFIG REQUIRED) # the tiler test writes a synthetic GeoTIFF

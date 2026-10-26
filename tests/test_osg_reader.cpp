@@ -104,7 +104,16 @@ TEST(OsgReader, SceneLoaderUsesItAheadOfVsgXchangeAndByteColoursBecomeAVsgColour
 {
     ivevsg::SceneLoader loader; // registers the OSG plugin directory for the .osgt writer below
     ASSERT_GE(loader.options()->readerWriters.size(), 3u);
-    EXPECT_TRUE(loader.options()->readerWriters[1].cast<ivevsg::OsgReader>()) << "OsgReader must come right after the load monitor";
+    // OsgReader sits after the monitor and our other readers, but ahead of vsgXchange::all
+    std::size_t osgIndex = 0, xchangeIndex = 0;
+    const auto& readers = loader.options()->readerWriters;
+    for (std::size_t i = 0; i < readers.size(); ++i)
+    {
+        if (readers[i].cast<ivevsg::OsgReader>()) osgIndex = i;
+        if (readers[i]->className() == std::string("vsgXchange::all")) xchangeIndex = i;
+    }
+    EXPECT_GT(osgIndex, 0u) << "the load monitor comes first";
+    EXPECT_LT(osgIndex, xchangeIndex) << "OsgReader must run before vsgXchange";
 
     osg::ref_ptr<osg::Vec4ubArray> colours = new osg::Vec4ubArray;
     colours->push_back(osg::Vec4ub(10, 20, 30, 255));

@@ -32,6 +32,9 @@ namespace ivevsg
     /// fine for a modal choice. defaultDirectory may be empty.
     FileDialogResult openFileDialog(const std::vector<FileFilter>& filters, const std::string& defaultDirectory = {});
 
+    /// The same for a directory (a TMS / XYZ tile set).
+    FileDialogResult openFolderDialog(const std::string& defaultDirectory = {});
+
     /// Runs a file picker on a worker thread so the viewer keeps rendering while it is open. open()
     /// starts it, busy() says whether it is still up, poll() hands back the result exactly once.
     /// The opener is injectable (defaults to openFileDialog) so the plumbing can be tested headless.
@@ -39,19 +42,23 @@ namespace ivevsg
     {
     public:
         using Opener = std::function<FileDialogResult(const std::vector<FileFilter>&, const std::string&)>;
+        using FolderOpener = std::function<FileDialogResult(const std::string&)>;
 
-        explicit AsyncFileDialog(Opener opener = {});
+        explicit AsyncFileDialog(Opener opener = {}, FolderOpener folderOpener = {});
         ~AsyncFileDialog();
         AsyncFileDialog(const AsyncFileDialog&) = delete;
         AsyncFileDialog& operator=(const AsyncFileDialog&) = delete;
 
         /// False (and nothing happens) while a dialog is already open.
         bool open(std::vector<FileFilter> filters, std::string defaultDirectory = {});
+        /// A folder picker instead of a file picker (for tile directories); shares busy() / poll().
+        bool openFolder(std::string defaultDirectory = {});
         bool busy() const;
         std::optional<FileDialogResult> poll();
 
     private:
         Opener _opener;
+        FolderOpener _folderOpener;
         std::future<FileDialogResult> _future;
     };
 } // namespace ivevsg

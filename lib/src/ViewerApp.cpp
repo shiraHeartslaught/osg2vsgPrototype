@@ -23,6 +23,12 @@ namespace ivevsg
     ViewerApp::~ViewerApp()
     {
         uninstallView();
+        if (_viewer) _viewer->deviceWaitIdle(); // nothing of the scene may be freed under a running frame
+    }
+
+    void ViewerApp::retire(vsg::ref_ptr<vsg::Object> node)
+    {
+        if (node) _retiredNodes.emplace_back(_frameCount, node);
     }
 
     // ---- what to show ----------------------------------------------------------------------------
@@ -58,7 +64,9 @@ namespace ivevsg
 
     bool ViewerApp::removeLayer(std::size_t index)
     {
-        return _layers && _layers->removeLayer(index);
+        if (!_layers || index >= _layers->layerCount()) return false;
+        retire(_layers->layer(index).placement); // its pipelines and textures outlive the frames still drawing them
+        return _layers->removeLayer(index);
     }
 
     std::vector<std::string> ViewerApp::loadingLayers() const
@@ -391,6 +399,8 @@ namespace ivevsg
             }
             previous->detach();
         }
+        for (auto& child : _sceneRoot->children) retire(child); // the old scene is still being drawn by frames in flight
+        retire(previousWorld);
         _sceneRoot->children.clear();
         _sceneRoot->addChild(_view->assembleScene(_world, viewportAspect()));
         installView(&carryOver);
@@ -528,6 +538,8 @@ namespace ivevsg
         _viewer->recordAndSubmit();
         _viewer->present();
         ++_frameCount;
+        // release what left the scene long enough ago that no submitted frame can still refer to it
+        _retiredNodes.erase(std::remove_if(_retiredNodes.begin(), _retiredNodes.end(), [this](const auto& entry) { return _frameCount - entry.first >= kRetireFrames; }), _retiredNodes.end());
         return true;
     }
 

@@ -28,8 +28,14 @@ add_library(ivevsg
     src/SceneBounds.cpp
     src/SceneLoader.cpp
     src/TileScheme.cpp
+    src/TextureCompress.cpp
+    src/TileGeometry.cpp
+    src/TileGrid.cpp
+    src/TileLayerReader.cpp
+    src/TileSource.cpp
     src/TileSetBuilder.cpp
     src/TrackballView.cpp
+    src/VsgReproject.cpp
     src/ViewerApp.cpp
     src/WorldView.cpp
 )

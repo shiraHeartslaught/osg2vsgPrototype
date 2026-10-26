@@ -1,5 +1,8 @@
+#include <ivevsg/LoaderKeys.h>
 #include <ivevsg/OsgReader.h>
 #include <ivevsg/SceneLoader.h>
+#include <ivevsg/TileLayerReader.h>
+#include <ivevsg/VsgReproject.h>
 
 #include <vsg/all.h>
 #include <vsgXchange/Version.h>
@@ -101,11 +104,14 @@ namespace ivevsg
         _options = vsg::Options::create();
         _monitor = LoadMonitor::create(_settings.logReads);
         _options->add(_monitor);
-        _options->add(OsgReader::create());      // our OSG reader first: fix-ups + reprojection before osg2vsg conversion
-        _options->add(vsgXchange::all::create()); // everything else (images, glTF, ...)
-        _options->setValue(OsgReader::kTargetCrs, _settings.targetCrs);
-        _options->setValue(OsgReader::kDefaultSourceCrs, _settings.defaultSourceCrs);
-        _options->setValue(OsgReader::kQuadTessellation, _settings.quadTessellation);
+        _options->add(TileLayerReader::create());  // rasters and tile directories become paged tile layers in the display frame
+        _options->add(VsgSceneReader::create());   // VSG native files, placed (reprojected) in the display frame
+        _options->add(OsgReader::create());        // our OSG reader: fix-ups + reprojection before osg2vsg conversion
+        _options->add(vsgXchange::all::create());  // everything else (images, glTF, ...)
+        _options->setValue(loaderKeys::targetCrs, _settings.targetCrs);
+        _options->setValue(loaderKeys::defaultSourceCrs, _settings.defaultSourceCrs);
+        _options->setValue(loaderKeys::quadTessellation, _settings.quadTessellation);
+        _options->setValue(loaderKeys::detailBias, _settings.detailBias);
         _options->paths = vsg::getEnvPaths("VSG_FILE_PATH");
         for (const auto& path : _settings.searchPaths) _options->paths.push_back(vsg::Path(path));
     }
@@ -122,7 +128,9 @@ namespace ivevsg
         LoadResult result;
 
         const vsg::Path path(filename);
-        const vsg::Path found = vsg::findFile(path, _options);
+        // a {z}/{x}/{y} tile template names no single file; everything else must exist
+        const bool templated = filename.find("{z}") != std::string::npos;
+        const vsg::Path found = templated ? path : vsg::findFile(path, _options);
         if (!found)
         {
             result.error = "File not found: " + filename;
@@ -135,14 +143,23 @@ namespace ivevsg
         auto options = vsg::Options::create(*_options);
         const vsg::Path directory = vsg::filePath(found);
         if (!directory.empty()) options->paths.push_back(directory);
-        if (!sourceCrs.empty()) options->setValue(OsgReader::kSourceCrs, sourceCrs);
-        result.node = vsg::read_cast<vsg::Node>(found, options);
+        if (!sourceCrs.empty()) options->setValue(loaderKeys::sourceCrs, sourceCrs);
+        vsg::ref_ptr<vsg::Object> object = vsg::read(found, options);
+        result.node = object.cast<vsg::Node>();
         if (result.node)
         {
-            result.node->getValue(OsgReader::kNodeSourceCrs, result.sourceCrs);
-            result.node->getValue(OsgReader::kNodeTargetCrs, result.targetCrs);
+            result.node->getValue(loaderKeys::nodeSourceCrs, result.sourceCrs);
+            result.node->getValue(loaderKeys::nodeTargetCrs, result.targetCrs);
         }
-        if (!result.node)
+        else if (auto readError = object.cast<vsg::ReadError>())
+        {
+            result.error = readError->message; // a reader recognised the file and says why it could not use it
+        }
+        else if (object)
+        {
+            result.error = filename + " is not a scene (it read as " + object->className() + ")";
+        }
+        if (!result.node && result.error.empty())
         {
             result.error = "No loader could read " + filename;
             const vsg::Path ext = vsg::lowerCaseFileExtension(path);

@@ -1,3 +1,4 @@
+#include <ivevsg/LoaderKeys.h>
 #include <ivevsg/SceneBounds.h>
 #include <ivevsg/SceneLoader.h>
 #include <ivevsg/TileSetBuilder.h>
@@ -398,4 +399,114 @@ TEST(TileSetBuilderGeocentric, TilesSitOnTheEllipsoidAndDeclareTheirFrame)
     EXPECT_NEAR(flat.max.x, kE, kE * 0.001);
     EXPECT_NEAR(flat.min.y, -kE, kE * 0.001);
     EXPECT_NEAR(flat.max.z - flat.min.z, 0.0, 10.0); // back on the plane
+}
+
+// ---- VSG native output ---------------------------------------------------------------------------
+
+namespace
+{
+    struct FindVsgTextures : public vsg::ConstVisitor
+    {
+        std::vector<vsg::ref_ptr<vsg::Data>> images;
+        std::vector<const vsg::PagedLOD*> plods;
+        void apply(const vsg::Node& node) override { node.traverse(*this); }
+        void apply(const vsg::PagedLOD& plod) override
+        {
+            plods.push_back(&plod);
+            plod.traverse(*this);
+        }
+        void apply(const vsg::StateGroup& group) override
+        {
+            for (const auto& command : group.stateCommands)
+            {
+                auto bind = command.cast<vsg::BindDescriptorSet>();
+                if (!bind || !bind->descriptorSet) continue;
+                for (const auto& descriptor : bind->descriptorSet->descriptors)
+                    if (auto image = descriptor.cast<vsg::DescriptorImage>())
+                        for (const auto& info : image->imageInfoList)
+                            if (info && info->imageView && info->imageView->image && info->imageView->image->data && info->imageView->image->data->width() > 1)
+                                images.push_back(info->imageView->image->data);
+            }
+            group.traverse(*this);
+        }
+    };
+} // namespace
+
+TEST_F(TileSetBuilderTest, WritesAVsgNativeGeocentricPyramidThatLoadsOnBothViews)
+{
+    ivevsg::TileSetSettings settings;
+    settings.sourceRaster = source.string();
+    settings.outputDirectory = (dir / "vsgb").string();
+    settings.format = ivevsg::TileSetFormat::Vsgb;
+    settings.geocentric = true;
+    settings.maxLevel = 2;
+    settings.tileSizePixels = 64;
+    settings.threads = 2;
+    const ivevsg::TileSetReport report = ivevsg::buildTileSet(settings);
+    ASSERT_TRUE(report) << report.error;
+    EXPECT_EQ(report.layout, "vsgb");
+    EXPECT_EQ(report.crs, "EPSG:4978");
+    EXPECT_EQ(report.filesWritten, 1u + 1u + 4u);
+    EXPECT_EQ(report.tilesWritten, 1u + 4u + 16u);
+    const std::filesystem::path out = dir / "vsgb";
+    EXPECT_TRUE(std::filesystem::exists(out / "root.vsgb"));
+    EXPECT_TRUE(std::filesystem::exists(out / "0/0/0.vsgb"));
+    EXPECT_TRUE(std::filesystem::exists(out / "1/1/1.vsgb"));
+
+    // on the globe: as read, with BC1 mip-mapped textures and a paged root whose children come from z/x/y.vsgb
+    {
+        ivevsg::LoaderSettings loaderSettings = ivevsg::SceneLoader::defaultSettings();
+        loaderSettings.targetCrs = "EPSG:4978";
+        ivevsg::SceneLoader loader(loaderSettings);
+        const ivevsg::LoadResult result = loader.load((out / "root.vsgb").string());
+        ASSERT_TRUE(result) << result.error;
+        EXPECT_EQ(result.sourceCrs, "EPSG:4978");
+        EXPECT_TRUE(result.targetCrs.empty());
+        FindVsgTextures finder;
+        result.node->accept(finder);
+        ASSERT_EQ(finder.images.size(), 1u);
+        EXPECT_EQ(finder.images[0]->properties.format, VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+        EXPECT_EQ(finder.images[0]->properties.mipLevels, 7); // 64 -> 1
+        EXPECT_EQ(finder.images[0]->width(), 16u);           // in blocks
+        ASSERT_EQ(finder.plods.size(), 1u);
+        const vsg::PagedLOD& plod = *finder.plods[0];
+        EXPECT_EQ(plod.filename, vsg::Path((out / "0/0/0.vsgb").string())) << "VSG makes the relative name absolute on reading";
+        ASSERT_TRUE(plod.options);
+        std::string childCrs;
+        EXPECT_TRUE(plod.options->getValue(ivevsg::loaderKeys::sourceCrs, childCrs));
+        EXPECT_EQ(childCrs, "EPSG:4978");
+        auto children = vsg::read_cast<vsg::Node>(plod.filename, plod.options);
+        ASSERT_TRUE(children);
+        FindVsgTextures childFinder;
+        children->accept(childFinder);
+        EXPECT_EQ(childFinder.images.size(), 4u);
+        ASSERT_EQ(childFinder.plods.size(), 4u) << "level 1 tiles still page to level 2";
+        // their children's names were written relative to the file they sit in, so they resolve to real files
+        for (const vsg::PagedLOD* child : childFinder.plods)
+        {
+            EXPECT_TRUE(std::filesystem::exists(child->filename.string())) << child->filename;
+            auto grandchildren = vsg::read_cast<vsg::Node>(child->filename, child->options);
+            EXPECT_TRUE(grandchildren) << child->filename;
+        }
+        const vsg::dbox bounds = ivevsg::computeGeometryBounds(*result.node);
+        ASSERT_TRUE(bounds.valid());
+        EXPECT_NEAR(bounds.max.x, 6378137.0, 1.0);
+        EXPECT_NEAR(bounds.min.x, -6378137.0, 1.0);
+    }
+    // on the map: reprojected by the VSG reprojector, children included through the options
+    {
+        ivevsg::LoaderSettings loaderSettings = ivevsg::SceneLoader::defaultSettings();
+        loaderSettings.targetCrs = "EPSG:3857";
+        ivevsg::SceneLoader loader(loaderSettings);
+        const ivevsg::LoadResult result = loader.load((out / "root.vsgb").string());
+        ASSERT_TRUE(result) << result.error;
+        EXPECT_EQ(result.sourceCrs, "EPSG:4978");
+        EXPECT_EQ(result.targetCrs, "EPSG:3857");
+        const vsg::dbox bounds = ivevsg::computeGeometryBounds(*result.node);
+        ASSERT_TRUE(bounds.valid());
+        EXPECT_NEAR(bounds.min.x, -kE, kE * 0.001);
+        EXPECT_NEAR(bounds.max.x, kE, kE * 0.001);
+        EXPECT_NEAR(bounds.max.y, kE, kE * 0.001);
+        EXPECT_NEAR(bounds.max.z, 0.0, 10.0);
+    }
 }

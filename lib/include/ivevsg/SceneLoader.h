@@ -31,6 +31,9 @@ namespace ivevsg
         std::string defaultSourceCrs = "EPSG:3857";
         /// Grid size single-quad tiles are split into before reprojection (1 = leave as quads).
         int quadTessellation = 1;
+        /// For tile layers cut at load time (rasters, tile directories): > 1 hands a tile over to
+        /// its children while it is still smaller on screen (sharper, more tiles resident).
+        double detailBias = 1.0;
     };
 
     /// What the loader (and the database pager, through the shared options) has read so far.

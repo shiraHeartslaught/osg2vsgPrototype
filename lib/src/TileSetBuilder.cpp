@@ -1,7 +1,13 @@
+#include <ivevsg/CrsTransform.h>
 #include <ivevsg/GeocentricProjection.h>
 #include <ivevsg/MercatorProjection.h>
 #include <ivevsg/SceneLoader.h>
+#include <ivevsg/TextureCompress.h>
+#include <ivevsg/TileGeometry.h>
 #include <ivevsg/TileSetBuilder.h>
+#include <ivevsg/VsgReproject.h>
+
+#include <vsg/all.h>
 
 #include <gdal_priv.h>
 #include <ogr_spatialref.h>
@@ -22,6 +28,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -90,12 +97,17 @@ namespace ivevsg
 
             bool valid() const { return _dataset != nullptr && _bands >= 1 && _geo[1] > 0.0 && _geo[5] < 0.0; }
             double metersPerPixel() const { return _geo[1]; }
+            vsg::dbox extent() const
+            {
+                return vsg::dbox(vsg::dvec3(_geo[0], _geo[3] + _geo[5] * _height, 0.0), vsg::dvec3(_geo[0] + _geo[1] * _width, _geo[3], 0.0));
+            }
 
             /// Resamples the raster covering `extent` into a size x size RGB buffer (rows north to south).
             /// Returns false when the extent lies entirely outside the raster.
-            bool read(const vsg::dbox& extent, int size, std::vector<unsigned char>& rgb) const
+            bool read(const vsg::dbox& extent, int size, std::vector<unsigned char>& rgb, int* coverage = nullptr) const
             {
                 rgb.assign(static_cast<std::size_t>(size) * size * 3, 0);
+                if (coverage) coverage[0] = coverage[1] = coverage[2] = coverage[3] = 0;
 
                 // the tile's footprint in source pixels, rows counted from the top
                 const double col0 = (extent.min.x - _geo[0]) / _geo[1];
@@ -115,6 +127,13 @@ namespace ivevsg
                 const int dy1 = std::clamp(static_cast<int>(std::ceil((r1 - row0) * sy - 1e-6)), 0, size);
                 const int dw = dx1 - dx0, dh = dy1 - dy0;
                 if (dw <= 0 || dh <= 0) return false;
+                if (coverage)
+                {
+                    coverage[0] = dx0;
+                    coverage[1] = dy0;
+                    coverage[2] = dx1;
+                    coverage[3] = dy1;
+                }
 
                 GDALRasterIOExtraArg extra;
                 INIT_RASTERIO_EXTRA_ARG(extra);
@@ -162,6 +181,41 @@ namespace ivevsg
             texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
             texture->setResizeNonPowerOfTwoHint(false);
             return texture;
+        }
+
+        /// Writes a tile image: RGBA PNG with alpha 255 inside the raster's coverage, or RGB JPEG.
+        bool writeImageTile(const std::vector<unsigned char>& rgbTopDown, const int* coverage, int size, const std::filesystem::path& file, const std::string& extension)
+        {
+            const bool alpha = extension != "jpg" && extension != "jpeg";
+            GDALDriver* mem = GetGDALDriverManager()->GetDriverByName("MEM");
+            GDALDriver* out = GetGDALDriverManager()->GetDriverByName(alpha ? "PNG" : "JPEG");
+            if (!mem || !out) return false;
+            const int bands = alpha ? 4 : 3;
+            GDALDataset* image = mem->Create("", size, size, bands, GDT_Byte, nullptr);
+            if (!image) return false;
+            std::vector<unsigned char> pixels(static_cast<std::size_t>(size) * size * bands);
+            for (int y = 0; y < size; ++y)
+                for (int x = 0; x < size; ++x)
+                {
+                    const unsigned char* src = rgbTopDown.data() + (static_cast<std::size_t>(y) * size + x) * 3;
+                    unsigned char* dst = pixels.data() + (static_cast<std::size_t>(y) * size + x) * bands;
+                    dst[0] = src[0];
+                    dst[1] = src[1];
+                    dst[2] = src[2];
+                    if (alpha) dst[3] = (x >= coverage[0] && x < coverage[2] && y >= coverage[1] && y < coverage[3]) ? 255 : 0;
+                }
+            const CPLErr err = image->RasterIO(GF_Write, 0, 0, size, size, pixels.data(), size, size, GDT_Byte, bands, nullptr, bands, static_cast<GSpacing>(size) * bands, 1, nullptr);
+            bool ok = err == CE_None;
+            if (ok)
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(file.parent_path(), ec);
+                GDALDataset* written = out->CreateCopy(file.string().c_str(), image, FALSE, nullptr, nullptr, nullptr);
+                ok = written != nullptr;
+                if (written) GDALClose(written);
+            }
+            GDALClose(image);
+            return ok;
         }
 
         /// Textured quad for one tile, in local coordinates around the tile centre for float precision.
@@ -292,7 +346,7 @@ namespace ivevsg
         }
 
         /// A tile that hands over to its children's file once it grows past the pixel threshold.
-        osg::ref_ptr<osg::Node> makePagedTile(const TileScheme& scheme, const TileIndex& tile, osg::ref_ptr<osg::Node> quad, double pixelThreshold, const GlobeTileBound* globe)
+        osg::ref_ptr<osg::Node> makeOsgPagedTile(const TileScheme& scheme, const TileIndex& tile, osg::ref_ptr<osg::Node> quad, double pixelThreshold, const GlobeTileBound* globe)
         {
             const vsg::dvec3 centre = scheme.tileCentre(tile);
             osg::ref_ptr<osg::PagedLOD> plod = new osg::PagedLOD;
@@ -326,7 +380,9 @@ namespace ivevsg
             double threshold = 0.0;
             std::filesystem::path outDir;
             osg::ref_ptr<osgDB::Options> writeOptions;
-            std::vector<TileIndex> parents; // tiles that get a children file, any order
+            std::vector<TileIndex> parents; // .ive output: tiles that get a children file, any order
+            std::vector<TileIndex> tiles;   // image output: every tile of every level
+            vsg::dbox sourceExtent;         // the source's footprint in EPSG:3857 (for tilemapresource.xml)
             std::atomic<std::size_t> next{0};
             std::atomic<std::size_t> filesWritten{0};
             std::atomic<std::size_t> tilesWritten{0};
@@ -336,13 +392,142 @@ namespace ivevsg
 
             Job(const TileSetSettings& s) : settings(s) {}
 
+            bool imageOutput() const { return settings.format == TileSetFormat::Tms || settings.format == TileSetFormat::Xyz; }
+            bool vsgOutput() const { return settings.format == TileSetFormat::Vsgb; }
+
+            // VSG native output: the frame the tiles are built in and the state they share
+            std::shared_ptr<const Projection> vsgProjection;
+            std::unique_ptr<TileStateFactory> vsgState;
+
+            /// A tile as a ready-to-draw VSG node: BC1 texture with mip chain, grid on the globe or
+            /// quad on the plane, paged when children exist. `toGeographic` is this thread's own.
+            vsg::ref_ptr<vsg::Node> makeVsgTile(const SourceRaster& source, const TileIndex& tile, std::vector<unsigned char>& rgb, const CrsTransform* toGeographic)
+            {
+                // VSG resolves a PagedLOD's relative filename against the directory of the file it
+                // was read from: root.vsgb sits in the set's root, every other tile sits in a
+                // z/x/y.vsgb two directories down, so its children's path climbs back up first
+                const std::string childPrefix = tile.level == 0 ? "" : "../../";
+                int coverage[4];
+                const vsg::dbox extent = scheme.tileExtent(tile);
+                if (!source.read(extent, settings.tileSizePixels, rgb, coverage)) return {};
+                ++tilesWritten;
+                const int size = settings.tileSizePixels;
+                auto rgba = vsg::ubvec4Array2D::create(static_cast<uint32_t>(size), static_cast<uint32_t>(size), vsg::ubvec4(0, 0, 0, 0), vsg::Data::Properties{VK_FORMAT_R8G8B8A8_UNORM});
+                for (int y = 0; y < size; ++y)
+                    for (int x = 0; x < size; ++x)
+                    {
+                        const unsigned char* px = rgb.data() + (static_cast<std::size_t>(y) * size + x) * 3;
+                        const bool inside = x >= coverage[0] && x < coverage[2] && y >= coverage[1] && y < coverage[3];
+                        rgba->set(static_cast<std::size_t>(y) * size + x, vsg::ubvec4(px[0], px[1], px[2], inside ? 255 : 0));
+                    }
+                vsg::ref_ptr<vsg::Data> texture = settings.compressTextures ? vsg::ref_ptr<vsg::Data>(compressBc1(*rgba, true)) : vsg::ref_ptr<vsg::Data>(rgba);
+                int cells = 1;
+                if (settings.geocentric && toGeographic)
+                {
+                    GeoPoint sw, ne;
+                    toGeographic->toGeographic(extent.min.x, extent.min.y, 0.0, sw);
+                    toGeographic->toGeographic(extent.max.x, extent.max.y, 0.0, ne);
+                    cells = tileCellsFor(sw, ne, settings.geocentricGrid);
+                }
+                const TileMesh mesh = buildTileMesh(*vsgProjection, extent, cells, settings.geocentric ? toGeographic : nullptr);
+                return makePagedTile(vsgState->createTile(mesh, texture), mesh.bound, needsFile(tile) ? childPrefix + TileScheme::relativePath(tile, ".vsgb") : std::string(), threshold / tileReferenceScreenHeight);
+            }
+
+            bool writeVsgChildrenFile(const SourceRaster& source, const TileIndex& parent, std::vector<unsigned char>& rgb, const CrsTransform* toGeographic)
+            {
+                auto group = vsg::Group::create();
+                for (const TileIndex& child : TileScheme::children(parent))
+                {
+                    if (auto node = makeVsgTile(source, child, rgb, toGeographic)) group->addChild(node);
+                }
+                if (group->children.empty()) return false;
+                const std::filesystem::path file = outDir / TileScheme::relativePath(parent, ".vsgb");
+                std::error_code ec;
+                std::filesystem::create_directories(file.parent_path(), ec);
+                if (!vsg::write(group, vsg::Path(file.string())))
+                {
+                    fail("failed to write " + file.string());
+                    return false;
+                }
+                return progress();
+            }
             bool needsFile(const TileIndex& tile) const { return tile.level < subdivisionLimit(tile, settings, scheme, maxLevel); }
 
             void plan(const TileIndex& tile)
             {
+                if (imageOutput())
+                {
+                    if (!overlaps(scheme.tileExtent(tile), sourceExtent)) return; // nothing of the raster under it
+                    tiles.push_back(tile);
+                    if (!needsFile(tile)) return;
+                    for (const TileIndex& child : TileScheme::children(tile)) plan(child);
+                    return;
+                }
                 if (!needsFile(tile)) return;
                 parents.push_back(tile);
                 for (const TileIndex& child : TileScheme::children(tile)) plan(child);
+            }
+
+            std::size_t filesPlanned() const { return imageOutput() ? tiles.size() : parents.size() + 1; }
+
+            std::filesystem::path imagePath(const TileIndex& tile) const
+            {
+                const int row = settings.format == TileSetFormat::Tms ? scheme.tilesAcross(tile.level) - 1 - tile.y : tile.y;
+                return outDir / std::to_string(tile.level) / std::to_string(tile.x) / (std::to_string(row) + "." + settings.imageExtension);
+            }
+
+            /// Writes one tile image; false when nothing of the source lies under it.
+            bool writeImage(const SourceRaster& source, const TileIndex& tile, std::vector<unsigned char>& rgb)
+            {
+                int coverage[4];
+                if (!source.read(scheme.tileExtent(tile), settings.tileSizePixels, rgb, coverage)) return false;
+                const std::filesystem::path file = imagePath(tile);
+                if (!writeImageTile(rgb, coverage, settings.tileSizePixels, file, settings.imageExtension))
+                {
+                    fail("failed to write " + file.string() + " (is GDAL's " + settings.imageExtension + " driver available?)");
+                    return false;
+                }
+                ++tilesWritten;
+                return progress();
+            }
+
+            /// OSGeo TMS description of the set, next to the tiles.
+            bool writeTileMapResource(double sourceMetersPerPixel) const
+            {
+                std::ofstream xml(outDir / "tilemapresource.xml");
+                if (!xml) return false;
+                xml.precision(17);
+                const vsg::dbox& b = sourceExtent;
+                xml << "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                    << "<TileMap version=\"1.0.0\" tilemapservice=\"http://tms.osgeo.org/1.0.0\">\n"
+                    << "  <Title>" << std::filesystem::path(settings.sourceRaster).stem().string() << "</Title>\n"
+                    << "  <Abstract>ivetiler, source " << sourceMetersPerPixel << " m/px</Abstract>\n"
+                    << "  <SRS>EPSG:3857</SRS>\n"
+                    << "  <BoundingBox minx=\"" << b.min.x << "\" miny=\"" << b.min.y << "\" maxx=\"" << b.max.x << "\" maxy=\"" << b.max.y << "\"/>\n"
+                    << "  <Origin x=\"" << -scheme.worldHalfExtent << "\" y=\"" << -scheme.worldHalfExtent << "\"/>\n"
+                    << "  <TileFormat width=\"" << settings.tileSizePixels << "\" height=\"" << settings.tileSizePixels
+                    << "\" mime-type=\"image/" << (settings.imageExtension == "jpg" ? "jpeg" : settings.imageExtension) << "\" extension=\"" << settings.imageExtension << "\"/>\n"
+                    << "  <TileSets profile=\"mercator\">\n";
+                const int deepest = std::max(maxLevel, settings.detailExtent.valid() ? settings.detailMaxLevel : maxLevel);
+                for (int level = 0; level <= deepest; ++level)
+                    xml << "    <TileSet href=\"" << level << "\" units-per-pixel=\"" << scheme.metersPerPixel(level) << "\" order=\"" << level << "\"/>\n";
+                xml << "  </TileSets>\n</TileMap>\n";
+                return static_cast<bool>(xml);
+            }
+
+            bool progress()
+            {
+                const std::size_t done = ++filesWritten;
+                if (settings.progress)
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (!settings.progress(done, filesPlanned()))
+                    {
+                        stop = true;
+                        return false;
+                    }
+                }
+                return true;
             }
 
             osg::ref_ptr<osg::Node> makeTile(const SourceRaster& source, const TileIndex& tile, std::vector<unsigned char>& rgb)
@@ -355,10 +540,10 @@ namespace ivevsg
                     osg::ref_ptr<osg::Node> grid = makeTileGlobeGrid(scheme, tile, image, settings.geocentricGrid);
                     if (!needsFile(tile)) return grid;
                     const GlobeTileBound bound = globeTileBound(scheme, tile, settings.geocentricGrid);
-                    return makePagedTile(scheme, tile, grid, threshold, &bound);
+                    return makeOsgPagedTile(scheme, tile, grid, threshold, &bound);
                 }
                 osg::ref_ptr<osg::Node> quad = makeTileQuad(scheme, tile, image);
-                return needsFile(tile) ? makePagedTile(scheme, tile, quad, threshold, nullptr) : quad;
+                return needsFile(tile) ? makeOsgPagedTile(scheme, tile, quad, threshold, nullptr) : quad;
             }
 
             bool write(osg::Node& node, const std::filesystem::path& file)
@@ -370,17 +555,7 @@ namespace ivevsg
                     fail("failed to write " + file.string() + " (is the OSG ive plugin available?)");
                     return false;
                 }
-                const std::size_t done = ++filesWritten;
-                if (settings.progress)
-                {
-                    std::lock_guard<std::mutex> lock(mutex);
-                    if (!settings.progress(done, parents.size() + 1))
-                    {
-                        stop = true;
-                        return false;
-                    }
-                }
-                return true;
+                return progress();
             }
 
             void fail(const std::string& message)
@@ -411,11 +586,35 @@ namespace ivevsg
                     return;
                 }
                 std::vector<unsigned char> rgb;
+                std::unique_ptr<CrsTransform> toGeographic; // OGR transformations are per thread
+                if (vsgOutput() && settings.geocentric)
+                {
+                    std::string error;
+                    toGeographic = CrsTransform::create("EPSG:3857", &error);
+                    if (!toGeographic)
+                    {
+                        fail(error);
+                        return;
+                    }
+                }
                 while (!stop)
                 {
                     const std::size_t i = next++;
-                    if (i >= parents.size()) break;
-                    writeChildrenFile(source, parents[i], rgb);
+                    if (imageOutput())
+                    {
+                        if (i >= tiles.size()) break;
+                        writeImage(source, tiles[i], rgb);
+                    }
+                    else if (vsgOutput())
+                    {
+                        if (i >= parents.size()) break;
+                        writeVsgChildrenFile(source, parents[i], rgb, toGeographic.get());
+                    }
+                    else
+                    {
+                        if (i >= parents.size()) break;
+                        writeChildrenFile(source, parents[i], rgb);
+                    }
                 }
             }
         };
@@ -425,6 +624,7 @@ namespace ivevsg
     {
         TileSetReport report;
         GDALAllRegister(); // once, on this thread, before any worker opens the source
+        vsg::dbox sourceExtent;
 
         {
             SourceRaster probe(settings.sourceRaster);
@@ -434,6 +634,7 @@ namespace ivevsg
                 return report;
             }
             report.sourceMetersPerPixel = probe.metersPerPixel();
+            sourceExtent = probe.extent();
         }
         if (settings.tileSizePixels < 2)
         {
@@ -447,18 +648,79 @@ namespace ivevsg
         job.threshold = subdivisionPixelThreshold(settings.tileSizePixels, settings.detailBias);
         job.outDir = settings.outputDirectory;
         if (settings.compressed) job.writeOptions = new osgDB::Options("compressed");
+        job.sourceExtent = sourceExtent;
         job.plan({0, 0, 0});
 
         report.maxLevel = job.maxLevel;
         report.detailMaxLevel = (settings.detailExtent.valid() && settings.detailMaxLevel > job.maxLevel) ? settings.detailMaxLevel : job.maxLevel;
-        report.filesPlanned = job.parents.size() + 1;
-        report.compressed = settings.compressed;
+        report.filesPlanned = job.filesPlanned();
+        report.compressed = settings.compressed && settings.format == TileSetFormat::Ive;
         report.threads = settings.threads > 0 ? settings.threads : std::max(1u, std::thread::hardware_concurrency());
-
-        SceneLoader::registerOsgPluginDirectory(SceneLoader::defaultOsgPluginDirectory()); // for the .ive writer
+        report.layout = settings.format == TileSetFormat::Ive ? "ive" : settings.format == TileSetFormat::Vsgb ? "vsgb" : settings.format == TileSetFormat::Tms ? "tms" : "xyz";
 
         std::error_code ec;
         std::filesystem::create_directories(job.outDir, ec);
+
+        if (job.imageOutput())
+        {
+            // plain tile images: the viewer builds the geometry itself, in whichever frame it shows
+            report.crs = "EPSG:3857";
+            report.rootFile = settings.format == TileSetFormat::Tms ? (job.outDir / "tilemapresource.xml").string() : job.outDir.string();
+            if (job.tiles.empty())
+            {
+                report.error = "the source raster does not cover any part of the world square";
+                return report;
+            }
+            std::vector<std::thread> workers;
+            for (unsigned i = 1; i < report.threads; ++i) workers.emplace_back([&job] { job.work(); });
+            job.work();
+            for (auto& worker : workers) worker.join();
+            if (job.error.empty() && settings.format == TileSetFormat::Tms && !job.writeTileMapResource(report.sourceMetersPerPixel))
+                job.error = "failed to write " + report.rootFile;
+            report.filesWritten = job.filesWritten;
+            report.tilesWritten = job.tilesWritten;
+            report.error = job.error;
+            return report;
+        }
+
+        if (job.vsgOutput())
+        {
+            // VSG native: the same pyramid as .ive, but each file is ready to draw; root.vsgb carries the CRS
+            job.vsgProjection = settings.geocentric ? std::shared_ptr<const Projection>(std::make_shared<GeocentricProjection>()) : std::make_shared<MercatorProjection>();
+            job.vsgState = std::make_unique<TileStateFactory>();
+            report.crs = settings.geocentric ? "EPSG:4978" : "EPSG:3857";
+            report.rootFile = (job.outDir / "root.vsgb").string();
+            {
+                SourceRaster source(settings.sourceRaster);
+                std::vector<unsigned char> rgb;
+                std::unique_ptr<CrsTransform> toGeographic = settings.geocentric ? CrsTransform::create("EPSG:3857") : nullptr;
+                vsg::ref_ptr<vsg::Node> tile = job.makeVsgTile(source, {0, 0, 0}, rgb, toGeographic.get());
+                if (!tile)
+                {
+                    report.error = "the source raster does not cover any part of the world square";
+                    return report;
+                }
+                auto root = job.vsgState->createRoot();
+                root->addChild(tile);
+                tagCrs(*root, report.crs);
+                if (!vsg::write(root, vsg::Path(report.rootFile)))
+                {
+                    report.error = "failed to write " + report.rootFile;
+                    return report;
+                }
+                job.progress();
+            }
+            std::vector<std::thread> workers;
+            for (unsigned i = 1; i < report.threads; ++i) workers.emplace_back([&job] { job.work(); });
+            job.work();
+            for (auto& worker : workers) worker.join();
+            report.filesWritten = job.filesWritten;
+            report.tilesWritten = job.tilesWritten;
+            report.error = job.error;
+            return report;
+        }
+
+        SceneLoader::registerOsgPluginDirectory(SceneLoader::defaultOsgPluginDirectory()); // for the .ive writer
 
         // root.ive on this thread first: it also loads the ive plugin before the workers need it
         {

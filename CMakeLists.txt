@@ -48,6 +48,7 @@ set(IVEVSG_HAS_OSG ${_xchg_osg})
 add_subdirectory(lib)
 add_subdirectory(app)
 add_subdirectory(tools/ivetiler)
+add_subdirectory(tools/ivevsgconv)
 
 if(IVEVSG_BUILD_TESTS)
     enable_testing()

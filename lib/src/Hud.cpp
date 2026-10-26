@@ -265,10 +265,23 @@ namespace ivevsg
                 }
                 state->dialog.open(sceneFileFilters(), startDirectory);
             }
+            ImGui::SameLine();
+            if (ImGui::Button(choosing ? "..." : "Tile folder..."))
+            {
+                std::string startDirectory;
+                if (state->newLayerPath[0] != '\0')
+                {
+                    std::error_code ec;
+                    const std::filesystem::path typed(state->newLayerPath.data());
+                    startDirectory = std::filesystem::is_directory(typed, ec) ? typed.string() : typed.parent_path().string();
+                }
+                state->dialog.openFolder(startDirectory);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("A TMS or XYZ tile directory (z/x/y.png, with or without tilemapresource.xml)");
             ImGui::EndDisabled();
             ImGui::SameLine();
             ImGui::SetNextItemWidth(-90.0f);
-            ImGui::InputTextWithHint("##newlayer", "or type a path to .ive / .vsgb / .osgb ...", state->newLayerPath.data(), state->newLayerPath.size());
+            ImGui::InputTextWithHint("##newlayer", "or a path: .ive / .vsgb / .tif / tile folder / {z}/{x}/{y}.png", state->newLayerPath.data(), state->newLayerPath.size());
             ImGui::SameLine();
             if (ImGui::Button("Add layer") && state->newLayerPath[0] != '\0')
             {

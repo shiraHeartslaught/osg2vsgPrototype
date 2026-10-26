@@ -12,11 +12,45 @@ namespace ivevsg
     std::vector<FileFilter> sceneFileFilters()
     {
         return {
-            {"Scene databases", "ive,vsgb,vsgt,osgb,osgt,osg"},
+            {"Scene databases and rasters", "ive,vsgb,vsgt,osgb,osgt,osg,tif,tiff,vrt,jp2,img,xml"},
             {"OpenSceneGraph", "ive,osgb,osgt,osg"},
             {"VulkanSceneGraph", "vsgb,vsgt"},
+            {"Rasters (GeoTIFF, JPEG 2000, VRT, ...)", "tif,tiff,gtiff,vrt,jp2,j2k,img,ecw,sid,ntf,nitf,dem,hgt"},
+            {"Tile sets (tilemapresource.xml)", "xml"},
             {"3D models", "gltf,glb,obj,fbx,dae,3ds"},
         };
+    }
+
+    namespace
+    {
+        bool ensureInitialised();
+    }
+
+    FileDialogResult openFolderDialog(const std::string& defaultDirectory)
+    {
+        FileDialogResult result;
+        if (!ensureInitialised())
+        {
+            result.error = std::string("file dialog unavailable: ") + (NFD_GetError() ? NFD_GetError() : "NFD_Init failed");
+            return result;
+        }
+        nfdnchar_t* outPath = nullptr;
+        const nfdresult_t status = NFD_PickFolderN(&outPath, defaultDirectory.empty() ? nullptr : defaultDirectory.c_str());
+        switch (status)
+        {
+        case NFD_OKAY:
+            result.accepted = true;
+            result.path = outPath ? outPath : "";
+            if (outPath) NFD_FreePathN(outPath);
+            break;
+        case NFD_CANCEL:
+            break;
+        default:
+            result.error = NFD_GetError() ? NFD_GetError() : "folder dialog failed";
+            NFD_ClearError();
+            break;
+        }
+        return result;
     }
 
     namespace
@@ -68,9 +102,18 @@ namespace ivevsg
         return result;
     }
 
-    AsyncFileDialog::AsyncFileDialog(Opener opener) :
-        _opener(opener ? std::move(opener) : Opener(&openFileDialog))
+    AsyncFileDialog::AsyncFileDialog(Opener opener, FolderOpener folderOpener) :
+        _opener(opener ? std::move(opener) : Opener(&openFileDialog)),
+        _folderOpener(folderOpener ? std::move(folderOpener) : FolderOpener(&openFolderDialog))
     {
+    }
+
+    bool AsyncFileDialog::openFolder(std::string defaultDirectory)
+    {
+        if (busy()) return false;
+        auto opener = _folderOpener;
+        _future = std::async(std::launch::async, [opener, defaultDirectory = std::move(defaultDirectory)]() { return opener(defaultDirectory); });
+        return true;
     }
 
     AsyncFileDialog::~AsyncFileDialog()

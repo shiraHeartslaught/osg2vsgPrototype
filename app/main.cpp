@@ -7,7 +7,7 @@
 //           [--globe-tiles <tiles/root.ive>] [--base <image>] [--no-base]
 //           [--projection mercator|globe] [--source-crs EPSG:xxxx] [--trackball] [--debug|-d] [--frames N]
 //           [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--elevation DEG]
-//           [--switch-at FRAME mercator|globe] [--log-loads] [--no-ui]
+//           [--switch-at FRAME mercator|globe] [--script FILE] [--log-loads] [--no-ui]
 //
 // Display: --projection picks the start view. Each view is a WorldView (lib/): the coordinate maths,
 // the navigation that suits it and its scene assembly rules live together, so the viewer only ever
@@ -19,12 +19,17 @@
 // default baked in) built with `ivetiler --geocentric`. --no-base shows none.
 //
 // Layers: every scene file and --layer file becomes a layer above the base (the first scene file
-// frames the start view). A layer is reprojected on load from its native CRS into the display frame,
+// frames the start view). Besides OSG databases this covers GeoTIFFs and other GDAL rasters (cut into
+// tiles on the fly), TMS / XYZ tile directories (or a {z}/{x}/{y}.png template) and VSG native files. A layer is reprojected on load from its native CRS into the display frame,
 // paged tiles included: the native CRS is what the file declares (a CoordinateSystemNode: with an
 // ellipsoid model = ECEF), else --layer-crs for --layer files, else --source-crs (default EPSG:3857).
 // The panel shows native and display CRS per layer and lets the native CRS be chosen when adding one.
 //
 // --switch-at FRAME VIEW switches the display projection after FRAME frames (demos, screenshots).
+// --script FILE runs a scenario unattended: one action per line, "FRAME ACTION ARGS", with the
+// actions add PATH [CRS] | remove INDEX|all | switch VIEW | goto LON LAT ZOOM | home | quit. Blank
+// lines and lines starting with # are ignored. Used to exercise adding, removing and switching
+// between data types while rendering (see scratch scenarios and the README).
 //
 // The heavy lifting lives in the ivevsg library (lib/), which is what the Google Test suite exercises.
 
@@ -40,9 +45,104 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
+
+namespace
+{
+    struct ScriptStep
+    {
+        int frame = 0;
+        std::string action;
+        std::vector<std::string> args;
+        bool done = false;
+    };
+
+    std::vector<ScriptStep> readScript(const std::string& file, std::string& error)
+    {
+        std::vector<ScriptStep> steps;
+        std::ifstream in(file);
+        if (!in)
+        {
+            error = "cannot read script " + file;
+            return steps;
+        }
+        std::string line;
+        int lineNumber = 0;
+        while (std::getline(in, line))
+        {
+            ++lineNumber;
+            std::istringstream words(line);
+            ScriptStep step;
+            if (!(words >> step.frame)) continue; // blank, or a comment
+            if (line.find_first_not_of(" \t") != std::string::npos && line[line.find_first_not_of(" \t")] == '#') continue;
+            words >> step.action;
+            for (std::string word; words >> word;) step.args.push_back(word);
+            if (step.action.empty())
+            {
+                error = file + ":" + std::to_string(lineNumber) + ": no action";
+                return steps;
+            }
+            steps.push_back(step);
+        }
+        return steps;
+    }
+
+    /// Runs the steps due at this frame. Returns false when the script asks to quit.
+    bool runScript(std::vector<ScriptStep>& steps, ivevsg::ViewerApp& app, double fieldOfViewDegrees)
+    {
+        for (ScriptStep& step : steps)
+        {
+            if (step.done || step.frame > app.frameCount()) continue;
+            step.done = true;
+            std::cout << "script: frame " << app.frameCount() << " " << step.action;
+            for (const std::string& a : step.args) std::cout << " " << a;
+            std::cout << std::endl;
+            if (step.action == "add" && !step.args.empty())
+            {
+                app.queueLayerLoad(ivevsg::LayerSource{step.args[0], "", step.args.size() > 1 ? step.args[1] : std::string()});
+            }
+            else if (step.action == "remove" && !step.args.empty())
+            {
+                if (step.args[0] == "all")
+                {
+                    if (auto layers = app.layers())
+                        while (layers->layerCount() > 0) app.removeLayer(layers->layerCount() - 1);
+                }
+                else
+                {
+                    app.removeLayer(static_cast<std::size_t>(std::atoi(step.args[0].c_str())));
+                }
+            }
+            else if (step.action == "switch" && !step.args.empty())
+            {
+                app.requestViewSwitch(step.args[0]);
+            }
+            else if (step.action == "goto" && step.args.size() >= 3)
+            {
+                const double viewportHeight = app.camera() ? static_cast<double>(app.camera()->getViewport().height) : 1024.0;
+                const double altitude = ivevsg::altitudeForZoomLevel(std::atof(step.args[2].c_str()), fieldOfViewDegrees, viewportHeight, 40075016.685578488);
+                app.lookAt(ivevsg::GeoPoint{std::atof(step.args[0].c_str()), std::atof(step.args[1].c_str()), 0.0}, altitude);
+            }
+            else if (step.action == "home")
+            {
+                app.frameScene();
+            }
+            else if (step.action == "quit")
+            {
+                return false;
+            }
+            else
+            {
+                std::cerr << "script: unknown action '" << step.action << "'\n";
+            }
+        }
+        return true;
+    }
+} // namespace
 
 #ifndef IVEVSG_DEFAULT_TILES
 #    define IVEVSG_DEFAULT_TILES ""
@@ -86,7 +186,19 @@ int main(int argc, char** argv)
     for (std::string path; arguments.read("--layer", path);) runtimeLayers.push_back(path);
     int switchFrame = -1;
     std::string switchTo;
-    arguments.read("--switch-at", switchFrame, switchTo); // all options must be consumed before the positional scene files
+    arguments.read("--switch-at", switchFrame, switchTo);
+    const std::string scriptFile = arguments.value(std::string(), "--script"); // all options must be consumed before the positional scene files
+    std::vector<ScriptStep> script;
+    if (!scriptFile.empty())
+    {
+        std::string error;
+        script = readScript(scriptFile, error);
+        if (!error.empty())
+        {
+            std::cerr << error << "\n";
+            return 1;
+        }
+    }
 
     std::vector<std::string> filenames;
     for (int i = 1; i < argc; ++i) filenames.emplace_back(argv[i]);
@@ -200,15 +312,16 @@ int main(int argc, char** argv)
     for (const std::string& line : app.view().controls()) std::cout << "Controls: " << line << "\n";
     std::cout << "Esc = quit\n";
 
-    if (switchFrame < 0) return app.run();
+    if (switchFrame < 0 && script.empty()) return app.run();
 
-    // scripted projection switch, for demos and screenshots
+    // scripted projection switch / scenario, for demos, screenshots and unattended checks
     int code = 0;
     try
     {
         while (app.frame())
         {
             if (app.frameCount() == switchFrame) app.requestViewSwitch(switchTo); // applied at the start of the next frame
+            if (!runScript(script, app, settings.fieldOfViewDegrees)) break;
         }
     }
     catch (const vsg::Exception& e)

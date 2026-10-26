@@ -1,3 +1,4 @@
+#include <ivevsg/LoaderKeys.h>
 #include <ivevsg/OsgReader.h>
 #include <ivevsg/OsgReproject.h>
 
@@ -91,12 +92,12 @@ namespace ivevsg
         return visitor.rewritten;
     }
 
-    const char* const OsgReader::kTargetCrs = "ivevsg.target_crs";
-    const char* const OsgReader::kSourceCrs = "ivevsg.source_crs";
-    const char* const OsgReader::kDefaultSourceCrs = "ivevsg.default_source_crs";
-    const char* const OsgReader::kQuadTessellation = "ivevsg.quad_tessellation";
-    const char* const OsgReader::kNodeSourceCrs = "ivevsg.node_source_crs";
-    const char* const OsgReader::kNodeTargetCrs = "ivevsg.node_target_crs";
+    const char* const OsgReader::kTargetCrs = loaderKeys::targetCrs;
+    const char* const OsgReader::kSourceCrs = loaderKeys::sourceCrs;
+    const char* const OsgReader::kDefaultSourceCrs = loaderKeys::defaultSourceCrs;
+    const char* const OsgReader::kQuadTessellation = loaderKeys::quadTessellation;
+    const char* const OsgReader::kNodeSourceCrs = loaderKeys::nodeSourceCrs;
+    const char* const OsgReader::kNodeTargetCrs = loaderKeys::nodeTargetCrs;
 
     OsgReader::OsgReader() = default;
 
