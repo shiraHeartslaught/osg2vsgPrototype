@@ -101,6 +101,10 @@ namespace ivevsg
         double viewportWidth() const;
         double viewportHeight() const;
 
+        /// z of the ground plane the altitude counts from (the terrain under the screen centre).
+        void setGroundHeight(double z);
+        double groundHeight() const { return _settings.groundHeight; }
+
         /// Last known pointer position in viewport pixels (for e.g. a cursor coordinate readout).
         struct PointerPosition
         {

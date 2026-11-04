@@ -349,3 +349,45 @@ TEST(GlobeNavigationHandler, ZoomLevelRangeNeverSendsTheGlobeOutOfSight)
     EXPECT_NEAR(handler->zoomLevel(), 10.0, 1e-9);
     EXPECT_NEAR(handler->maxZoomLevel(), 22.0, 1e-9);
 }
+
+TEST(GlobeCameraTerrain, GroundHeightLiftsTheEyeAndThePick)
+{
+    ivevsg::GeocentricProjection globe;
+    ivevsg::GlobeNavigationSettings settings;
+    ivevsg::GlobeCamera camera;
+    camera.longitude = 20.0;
+    camera.latitude = 10.0;
+    camera.altitude = 5000.0;
+
+    const ivevsg::CameraPose bare = ivevsg::globeCameraPose(camera, globe);
+    EXPECT_NEAR(globe.worldToGeo(bare.eye).altitude, 5000.0, 1.0);
+    EXPECT_NEAR(globe.worldToGeo(bare.centre).altitude, 0.0, 1e-3);
+
+    camera.groundHeight = 2000.0; // a plateau under the screen centre
+    const ivevsg::CameraPose lifted = ivevsg::globeCameraPose(camera, globe);
+    EXPECT_NEAR(globe.worldToGeo(lifted.eye).altitude, 7000.0, 1.0) << "the altitude counts from the terrain";
+    EXPECT_NEAR(globe.worldToGeo(lifted.centre).altitude, 2000.0, 1e-3);
+    EXPECT_NEAR(globe.worldToGeo(lifted.centre).longitude, 20.0, 1e-9);
+    EXPECT_LE(lifted.nearPlane, 5000.0 * 0.001 + 1e-6) << "the near plane follows the distance to the terrain, not to the ellipsoid";
+
+    // the pick under the screen centre lands on the plateau's level at the camera's position
+    ivevsg::GeoPoint hit;
+    ASSERT_TRUE(ivevsg::globePointAtPixel(camera, 400.0, 300.0, 800.0, 600.0, settings, globe, hit));
+    EXPECT_NEAR(hit.longitude, 20.0, 1e-6);
+    EXPECT_NEAR(hit.latitude, 10.0, 1e-6);
+
+    // the handler keeps the ground height across spins and zooms, and exposes it
+    auto lookAt = vsg::LookAt::create(lifted.eye, lifted.centre, lifted.up);
+    auto perspective = vsg::Perspective::create(30.0, 800.0 / 600.0, 1.0, 1.0e8);
+    auto vsgCamera = vsg::Camera::create(perspective, lookAt, vsg::ViewportState::create(VkExtent2D{800, 600}));
+    auto handler = ivevsg::GlobeNavigationHandler::create(vsgCamera, std::make_shared<ivevsg::GeocentricProjection>(), settings);
+    handler->setGroundHeight(2000.0);
+    EXPECT_EQ(handler->groundHeight(), 2000.0);
+    EXPECT_NEAR(globe.worldToGeo(lookAt->eye).altitude, handler->globeCamera().altitude + 2000.0, 1.0);
+    ivevsg::GlobeCamera moved = handler->globeCamera();
+    moved.longitude += 1.0;
+    handler->setGlobeCamera(moved);
+    EXPECT_EQ(handler->groundHeight(), 2000.0);
+    handler->setGroundHeight(0.0);
+    EXPECT_NEAR(globe.worldToGeo(lookAt->eye).altitude, handler->globeCamera().altitude, 1.0);
+}

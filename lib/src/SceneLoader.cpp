@@ -1,7 +1,10 @@
+#include <ivevsg/CrsTransform.h>
 #include <ivevsg/LoaderKeys.h>
 #include <ivevsg/OsgReader.h>
 #include <ivevsg/SceneLoader.h>
+#include <ivevsg/TerrainLayerReader.h>
 #include <ivevsg/TileLayerReader.h>
+#include <ivevsg/VectorLayerReader.h>
 #include <ivevsg/VsgReproject.h>
 
 #include <vsg/all.h>
@@ -100,18 +103,27 @@ namespace ivevsg
         _settings(std::move(settings))
     {
         registerOsgPluginDirectory(_settings.osgPluginDirectory);
+        ensureGdalRegistered(); // on this thread, before any worker opens a raster or a vector file
+        if (!_settings.elevation) _settings.elevation = ElevationRegistry::create();
 
         _options = vsg::Options::create();
         _monitor = LoadMonitor::create(_settings.logReads);
         _options->add(_monitor);
-        _options->add(TileLayerReader::create());  // rasters and tile directories become paged tile layers in the display frame
-        _options->add(VsgSceneReader::create());   // VSG native files, placed (reprojected) in the display frame
-        _options->add(OsgReader::create());        // our OSG reader: fix-ups + reprojection before osg2vsg conversion
-        _options->add(vsgXchange::all::create());  // everything else (images, glTF, ...)
+        _options->add(TerrainLayerReader::create()); // DTED / DEMs become paged terrain surfaces in the display frame
+        _options->add(VectorLayerReader::create());  // shapefiles and other OGR files become paged line layers
+        _options->add(TileLayerReader::create());    // rasters and tile directories become paged tile layers in the display frame
+        _options->add(VsgSceneReader::create());     // VSG native files, placed (reprojected) in the display frame
+        _options->add(OsgReader::create());          // our OSG reader: fix-ups + reprojection before osg2vsg conversion
+        _options->add(vsgXchange::all::create());    // everything else (images, glTF, ...)
         _options->setValue(loaderKeys::targetCrs, _settings.targetCrs);
         _options->setValue(loaderKeys::defaultSourceCrs, _settings.defaultSourceCrs);
         _options->setValue(loaderKeys::quadTessellation, _settings.quadTessellation);
         _options->setValue(loaderKeys::detailBias, _settings.detailBias);
+        _options->setValue(loaderKeys::drape, _settings.drape);
+        _options->setValue(loaderKeys::drapeMinZoom, _settings.drapeMinZoom);
+        _options->setValue(loaderKeys::vectorMaxLevel, _settings.vectorMaxLevel);
+        _options->setValue(loaderKeys::wideLines, _settings.wideLines);
+        _options->setObject(loaderKeys::elevationRegistry, _settings.elevation);
         _options->paths = vsg::getEnvPaths("VSG_FILE_PATH");
         for (const auto& path : _settings.searchPaths) _options->paths.push_back(vsg::Path(path));
     }
@@ -125,8 +137,16 @@ namespace ivevsg
 
     LoadResult SceneLoader::load(const std::string& filename, const std::string& sourceCrs) const
     {
-        LoadResult result;
+        LayerSource source;
+        source.path = filename;
+        source.sourceCrs = sourceCrs;
+        return load(source);
+    }
 
+    LoadResult SceneLoader::load(const LayerSource& source) const
+    {
+        LoadResult result;
+        const std::string& filename = source.path;
         const vsg::Path path(filename);
         // a {z}/{x}/{y} tile template names no single file; everything else must exist
         const bool templated = filename.find("{z}") != std::string::npos;
@@ -143,13 +163,39 @@ namespace ivevsg
         auto options = vsg::Options::create(*_options);
         const vsg::Path directory = vsg::filePath(found);
         if (!directory.empty()) options->paths.push_back(directory);
-        if (!sourceCrs.empty()) options->setValue(loaderKeys::sourceCrs, sourceCrs);
+        if (!source.sourceCrs.empty()) options->setValue(loaderKeys::sourceCrs, source.sourceCrs);
+        const LayerOptions& o = source.options;
+        options->setValue(loaderKeys::layerKind, std::string(layerKindName(o.kind)));
+        options->setValue(loaderKeys::detailLevelCap, o.detailLevelCap);
+        options->setValue(loaderKeys::terrainExaggeration, o.terrain.exaggeration);
+        options->setValue(loaderKeys::terrainInterpolation, static_cast<int>(o.terrain.interpolation));
+        options->setValue(loaderKeys::terrainOversample, o.terrain.oversampleLevels);
+        options->setValue(loaderKeys::terrainCells, o.terrain.cellsPerTile);
+        options->setValue(loaderKeys::terrainTexture, o.terrain.texturePixels);
+        options->setValue(loaderKeys::terrainHillshade, o.terrain.hillshade);
+        options->setValue(loaderKeys::vectorColour, o.vector.colour);
+        options->setValue(loaderKeys::vectorLineWidth, o.vector.lineWidth);
+        options->setValue(loaderKeys::vectorPointSize, o.vector.pointSize);
+
         vsg::ref_ptr<vsg::Object> object = vsg::read(found, options);
         result.node = object.cast<vsg::Node>();
         if (result.node)
         {
             result.node->getValue(loaderKeys::nodeSourceCrs, result.sourceCrs);
             result.node->getValue(loaderKeys::nodeTargetCrs, result.targetCrs);
+            result.node->getValue(loaderKeys::nodeLayerKind, result.kind);
+            result.node->getValue(loaderKeys::nodeInfo, result.info);
+            result.node->getValue(loaderKeys::nodeDeclaredScale, result.declaredScale);
+            result.node->getValue(loaderKeys::nodeNativeLevel, result.nativeLevel);
+            result.node->getValue(loaderKeys::nodeMaxLevel, result.maxLevel);
+            result.node->getValue(loaderKeys::nodeTerrainRegistryId, result.terrainRegistryId);
+            if (result.kind.empty())
+            {
+                if (TileLayerReader::handlesRaster(found) || TileLayerReader::handlesTileSet(found))
+                    result.kind = "raster";
+                else
+                    result.kind = "scene";
+            }
         }
         else if (auto readError = object.cast<vsg::ReadError>())
         {

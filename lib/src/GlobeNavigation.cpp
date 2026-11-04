@@ -34,7 +34,7 @@ namespace ivevsg
         GlobeFrame frameOf(const GlobeCamera& camera, const Projection& globe)
         {
             GlobeFrame f;
-            f.centre = globe.geoToWorld(GeoPoint{camera.longitude, camera.latitude, 0.0});
+            f.centre = globe.geoToWorld(GeoPoint{camera.longitude, camera.latitude, camera.groundHeight});
             tangentFrame(globe, f.centre, f.east, f.north, f.up);
             const double h = radians(camera.heading), t = radians(camera.tilt);
             const vsg::dvec3 ahead = f.north * std::cos(h) + f.east * std::sin(h); // ground direction the top of the screen points along
@@ -76,7 +76,8 @@ namespace ivevsg
         pose.centre = f.centre;
         pose.eye = f.eye;
         pose.up = f.cameraUp;
-        const double eyeHeight = std::max(1.0, globe.worldToGeo(f.eye).altitude);
+        // the near plane follows whichever is closer: the ellipsoid, or the terrain the altitude counts from
+        const double eyeHeight = std::max(1.0, std::min(globe.worldToGeo(f.eye).altitude, camera.altitude));
         const double equatorialRadius = vsg::length(globe.geoToWorld(GeoPoint{0.0, 0.0, 0.0}));
         pose.nearPlane = std::max(1.0, eyeHeight * 0.001);
         pose.farPlane = vsg::length(f.eye) + equatorialRadius * 1.1; // past the far side of the globe
@@ -116,7 +117,8 @@ namespace ivevsg
         const GlobeFrame f = frameOf(camera, globe);
         const vsg::dvec3 direction = pixelRay(f, px, py, viewportWidth, viewportHeight, settings.fieldOfViewDegrees);
         vsg::dvec3 world;
-        if (!intersectEllipsoid(f.eye, direction, settings.semiMajorAxis, settings.semiMinorAxis, world)) return false;
+        // the ellipsoid lifted by the ground height, so picks near the centre land on the terrain's level
+        if (!intersectEllipsoid(f.eye, direction, settings.semiMajorAxis + camera.groundHeight, settings.semiMinorAxis + camera.groundHeight, world)) return false;
         hit = globe.worldToGeo(world);
         hit.altitude = 0.0;
         return true;
@@ -229,6 +231,13 @@ namespace ivevsg
     void GlobeNavigationHandler::setGlobeCamera(const GlobeCamera& camera)
     {
         _current = clampGlobeCamera(camera, _settings);
+        applyToCamera();
+    }
+
+    void GlobeNavigationHandler::setGroundHeight(double metres)
+    {
+        if (_current.groundHeight == metres) return;
+        _current.groundHeight = metres;
         applyToCamera();
     }
 

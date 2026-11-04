@@ -32,6 +32,8 @@ namespace ivevsg
         void setZoomLevelRange(double minZoomLevel, double maxZoomLevel) override;
         double minZoomLevel() const override;
         double maxZoomLevel() const override;
+        void setSurfaceHeight(double metres) override;
+        double surfaceHeight() const override;
         std::vector<std::string> controls() const override;
 
         vsg::ref_ptr<MapNavigationHandler> navigation() const { return _navigation; }

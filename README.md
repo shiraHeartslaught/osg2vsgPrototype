@@ -7,14 +7,19 @@ This app if mostly coded by an AI (Claude) at this time for some prototyping wor
 
 A VulkanSceneGraph web-map style viewer: a NASA Blue Marble base map, on the flat Web Mercator map
 or on the WGS84 globe, with OpenSceneGraph `.ive` paged databases (or anything vsgXchange can read)
-draped on top as layers, each reprojected from its own CRS into whichever frame is displayed.
+draped on top as layers, each reprojected from its own CRS into whichever frame is displayed. DTED
+and other elevation rasters become terrain surfaces that stay smooth past their own resolution;
+shapefiles and other OGR vector files become line layers that gain detail per zoom level, switch
+between scales, and drape over the terrain.
 
 ```
-ive_poc [scene files ...] [--layer FILE ...] [--layer-crs EPSG:xxxx] [--base-tiles <tiles/root.ive>]
-        [--globe-tiles <tiles/root.ive>] [--base <image>] [--no-base]
+ive_poc [scene files ...] [--layer FILE[?opts] ...] [--terrain FILE|DIR ...] [--vector FILE ...] [--layer-crs EPSG:xxxx]
+        [--base-tiles <tiles/root.ive>] [--globe-tiles <tiles/root.ive>] [--base <image>] [--no-base]
         [--projection mercator|globe] [--source-crs EPSG:xxxx] [--trackball] [--debug|-d] [--frames N]
-        [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--elevation DEG]
-        [--switch-at FRAME mercator|globe] [--log-loads] [--no-ui]
+        [--zoom Z] [--center LON LAT] [--max-zoom Z] [--min-zoom Z] [--globe-max-zoom Z] [--map-max-zoom Z]
+        [--global-min-zoom Z] [--no-drape] [--drape-min-zoom Z] [--resolution-tolerance N]
+        [--exaggeration F] [--terrain-interp nearest|bilinear|bicubic] [--terrain-oversample N] [--vector-max-level N]
+        [--elevation DEG] [--switch-at FRAME mercator|globe] [--script FILE] [--log-loads] [--no-ui]
 ```
 
 ## Views: one module per world display
@@ -123,6 +128,8 @@ path) or as a base map (`--base-tiles` / `--globe-tiles`):
 | `.vsgb`, `.vsgt` (single files, or `ivetiler --format vsgb` pyramids) | `VsgSceneReader` | reprojected by `VsgReproject` from the CRS tagged in the file (or the override / default); paged children inherit it |
 | GeoTIFF, JPEG 2000, VRT, ERDAS `.img`, ... (anything GDAL reads, by extension) | `TileLayerReader` + `RasterTileSource` | warped by GDAL into WebMercatorQuad tiles on demand, from its own CRS or the override |
 | TMS directory (`tilemapresource.xml`), XYZ directory, `{z}/{x}/{y}.png` template | `TileLayerReader` + `DirectoryTileSource` | tile images read as they are; EPSG:3857 or EPSG:4326 grids |
+| DTED (`.dt0`, `.dt1`, `.dt2`), SRTM `.hgt`, a directory of cells, any GDAL DEM with `--terrain` / `?kind=terrain` | `TerrainLayerReader` + `ElevationSource` | a paged terrain surface in the display frame (see "Terrain" below) |
+| Shapefile, GeoJSON, GeoPackage, KML, GML, FlatGeobuf, ... (anything OGR reads) | `VectorLayerReader` + `VectorSource` | paged line layers in the display frame, draped over the terrain (see "Vector layers" below) |
 
 **Rasters and tile sets** become a quadtree of `vsg::PagedLOD` nodes whose children have virtual
 names (`ivevsg-tile://<layer>/z/x/y`) that the database pager hands back to `TileLayerReader`, so a
@@ -160,6 +167,123 @@ ivevsgconv <input.ive|.osgb|.tif|...> <output.vsgb|.vsgt> [--crs EPSG:xxxx] [--s
   tools (`vsgconv`) have no tag and are taken as the loader default (`--source-crs`) unless a
   native CRS is chosen when adding them.
 
+## Terrain (DTED and other elevation rasters)
+
+`--terrain FILE`, a `.dt0` / `.dt1` / `.dt2` / `.hgt` file given as a layer, or a directory of such
+cells (mosaicked through a GDAL VRT at the finest resolution) becomes a terrain surface: a
+quadtree of `vsg::PagedLOD` tiles on the WebMercatorQuad grid, each a 32 x 32 mesh whose vertices
+carry the sampled heights (`ElevationSource`, GDAL underneath; projected DEMs are warped to
+geographic coordinates on the fly) placed in the display frame, above the ellipsoid on the globe and
+as z on the flat map, with a hillshaded hypsometric texture (128 px per tile) computed from the same
+heights. Any GDAL raster is read as terrain when asked (`--terrain`, `?kind=terrain`, or the panel's
+"Load as" chooser); by extension only DTED and HGT are.
+
+Zooming in past the data's resolution keeps the surface smooth: tiles hand over to children at the
+same screen size as imagery tiles, and keep subdividing `oversampleLevels` (default 4, i.e. 16 x
+finer than the posts) past the *native level*, the tile level at which a mesh cell equals a post
+(level 14 for DTED 1 with 32 cells, 16 for DTED 2; `TerrainLayerReader::nativeLevelFor`). Below the
+native level a tile reads the posts it covers averaged down to about two per texel; at or past it the
+tile reads the native posts with a margin and interpolates between them, bicubic (Catmull-Rom) by
+default, bilinear or nearest on request. The result is that the DTED is shown at full resolution and
+then magnified with smooth slopes within the viewport rather than steps, until the oversample limit,
+where the deepest tiles simply stay on screen. Per-layer settings (`?key=value` on the path, the
+panel's layer settings, the `--exaggeration` / `--terrain-interp` / `--terrain-oversample` defaults):
+
+| option | meaning | default |
+|---|---|---|
+| `exaggeration=F` | vertical scale (the registry reports exaggerated heights, so draping and the camera match the mesh) | 1 |
+| `interp=nearest|bilinear|bicubic` | between posts, past the native level | bicubic |
+| `oversample=N` | tile levels past the native level that keep subdividing | 4 |
+| `cells=N`, `texture=N` | mesh cells and hillshade texels per tile side | 32, 128 |
+| `hillshade=0|1` | shade by slope, or a flat hypsometric tint | 1 |
+| `cap=N` | deepest tile level, whatever the data says | own limit |
+
+While a terrain layer is shown its source is registered in the loader's `ElevationRegistry`
+(shared across view switches), which answers "height under this point" for the camera and for
+vector draping; hiding or removing the layer takes it out again. The camera rides the terrain: every
+frame the height under the screen centre becomes the view's *surface height*
+(`WorldView::setSurfaceHeight`), from which the altitude and zoom level count, so zooming into a
+mountain never sinks the eye into it; on the globe the pick under the cursor meets the ellipsoid
+lifted by that height. The panel shows the terrain height under the cursor and under the centre.
+
+`data/fetch_dted_sample.sh` makes genuine DTED cells to try this with: two Copernicus GLO-30 tiles
+over San Francisco Bay converted with GDAL to DTED level 2 (`n37_w123.dt2`, `n37_w122.dt2`) and one
+level 1 cell, in `ive_test/dted/`. The whole directory loads as one terrain:
+
+```
+ive_poc --projection globe --terrain /run/media/heartslaught/games/ive_test/dted --center -122.45 37.75 --zoom 12
+ive_poc --terrain "/run/media/heartslaught/games/ive_test/dted/n37_w123.dt2?exaggeration=2&interp=bilinear"
+```
+
+## Vector layers (shapefiles and other OGR files)
+
+`--vector FILE`, a `.shp` / `.geojson` / `.gpkg` / `.kml` / ... given as a layer, or anything with
+`?kind=vector`, is read through OGR (`VectorSource`: every layer of the data source, transformed to
+WGS84 degrees, curves linearised; a shapefile without `.prj` is taken as EPSG:4326, or the native
+CRS chosen when adding it) and drawn as lines (polygon outlines, line strings, and crosses for
+points) in the display frame. The features are kept in memory once and served as a quadtree of
+`vsg::PagedLOD` tiles on the WebMercatorQuad grid: each tile holds the features clipped to its
+footprint, simplified (Douglas-Peucker) to half a pixel at the tile's hand-over size and densified so
+that no edge spans more than a 32nd of the tile, so a long border follows the globe and the terrain.
+Tiles hand over at the same screen size as imagery and page down to level 16
+(`--vector-max-level`, `?cap=N`), so a boundary file gains detail as the view zooms in and costs
+little when zoomed out. One pipeline per layer draws them with a dynamic line width
+(`vsg::SetLineWidth`, needs the device's `wideLines` feature, which the viewer enables when present;
+otherwise widths clamp to a pixel) and one shared colour, both editable live from the panel
+(`?colour=rrggbb[aa]`, `?width=PX`, `?pointsize=PX` set the start values).
+
+**Draping.** With "Drape vector layers over terrain" on (default; `--no-drape` turns it off) a
+vector tile at or past the drape level (default 8, `--drape-min-zoom`, the panel's "from zoom")
+puts every vertex on the terrain from the `ElevationRegistry`, a little above it, when any terrain
+covers it. Coarser tiles stay on the ellipsoid (lifted two ground pixels per layer index, the same
+lift that keeps overlapping layers from z-fighting). Loading or removing a terrain layer, or changing
+the draping settings, reloads the vector layers so their tiles pick the change up.
+
+**Scales and LOD groups.** A vector layer may declare the resolution it was drawn for, as a scale
+denominator: Natural Earth names carry it (`ne_10m_` = 1:10 000 000, `ne_50m_`, `ne_110m_`), and
+`?scale=1:50000000` / `?scale=50m` / the panel's "scale" field set it for anything else. A layer at
+1:S *resolves* up to the zoom level at which one OGC 0.28 mm pixel covers the ground S maps to
+(`zoomLevelForScaleDenominator`: 5.8 for 1:10M, 3.5 for 1:50M, 2.3 for 1:110M), plus the
+*resolution tolerance* (default 2 levels, `--resolution-tolerance`). Layers that share an *LOD group*
+(`?group=NAME`; by default the name without its Natural Earth prefix, so the three scales of
+`admin_0_countries` group themselves) are alternatives: the coarsest member that still resolves at
+the current zoom is the one drawn, and past the finest member's reach the finest stands in,
+magnified. So with all three Natural Earth country sets loaded, zooming in moves from the 1:110M
+to the 1:50M to the 1:10M boundaries by itself; the panel says which one is showing and why the
+others are hidden. `data/fetch_natural_earth.sh` downloads the country, state / province and US
+county sets at all available scales:
+
+```
+ive_poc --projection globe --terrain ive_test/dted \
+        --layer ive_test/naturalearth/ne_110m_admin_0_countries.shp \
+        --layer ive_test/naturalearth/ne_50m_admin_0_countries.shp \
+        --layer "ive_test/naturalearth/ne_10m_admin_0_countries.shp?colour=ff4040&width=2" \
+        --layer "ive_test/naturalearth/ne_10m_admin_1_states_provinces.shp?colour=40ff80&minzoom=4" \
+        --layer "ive_test/naturalearth/ne_10m_admin_2_counties.shp?colour=ffff40&minzoom=7"
+```
+
+## Zoom rules: what shows when
+
+Every layer has a zoom window and every frame the viewer decides what is drawn
+(`evaluateLayerVisibility`, `LayerVisibility.h`), hidden layers being skipped by the traversal so
+nothing below them pages in:
+
+- **Layers load from zoom** (`--global-min-zoom`, the panel slider): below this zoom no layer is
+  drawn or paged at all, whatever its own window says.
+- **Per layer min / max zoom** (`?minzoom=`, `?maxzoom=`, the layer's settings in the panel): the
+  layer appears only between them.
+- **LOD groups** as above pick one member per group.
+- **Globe max zoom / Map max zoom** (`--globe-max-zoom`, `--map-max-zoom`, the panel sliders) bound
+  how far each view can be zoomed in, on top of the shared `--min-zoom` / `--max-zoom`; the ceiling
+  is remembered per view across switches.
+- **Draping** as above, from the drape level on.
+
+The panel's layer list shows each layer's kind, why it is hidden or magnified ("shows from zoom 7",
+"another scale of 'admin_0_countries' shows at this zoom", "beyond 1:10000000, magnified"), and a
+Settings node with the zoom window, declared scale and group (applied at once), the detail cap, and
+the kind-specific style (colour and width live for vectors; exaggeration, interpolation,
+oversampling, mesh and texture density for terrain, applied by "Reload layer").
+
 ### Changing data at runtime
 
 Layers of any format can be added, removed and reloaded into the other projection while the
@@ -175,7 +299,10 @@ viewer renders and pages. Two rules keep that crash-free:
   memory. Layer ids are unique across readers and views.
 
 `ive_poc --script FILE` runs a scenario unattended for checking this (one `FRAME ACTION ARGS` per
-line: `add PATH [CRS]`, `remove INDEX|all`, `switch VIEW`, `goto LON LAT ZOOM`, `home`, `quit`).
+line: `add PATH[?opts] [CRS]`, `terrain PATH`, `vector PATH`, `remove INDEX|all`, `reload INDEX`,
+`switch VIEW`, `goto LON LAT ZOOM`, `orient HEADING TILT`, `home`, `set KEY VALUE` with the keys `drape on|off`,
+`drapeminzoom`, `globalminzoom`, `globemaxzoom`, `mapmaxzoom`, `tolerance`, `width INDEX PX`,
+`colour INDEX rrggbb`, `quit`).
 Run it with `--debug` for the validation layer, or with an AddressSanitizer build
 (`cmake -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS=-fsanitize=address
 -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address`, then `ASAN_OPTIONS=detect_leaks=0`). A scenario that
@@ -288,12 +415,16 @@ so these drape the globe as read and reproject onto the Mercator map.
   - `MapNavigation` — Web Mercator zoom levels, pan/zoom arithmetic, `MapNavigationHandler`
   - `GlobeNavigation` — `GlobeCamera` (lon/lat/altitude/heading/tilt), ray-ellipsoid picking, spin/zoom arithmetic, `GlobeNavigationHandler`
   - `TileScheme` — OGC WebMercatorQuad tile matrix set maths (extents, resolutions, scale denominators)
+  - `ElevationSource` — DTED / DEM heights through GDAL (windows at any resolution, mosaics, bilinear / bicubic sampling) and the `ElevationRegistry` the terrain layers publish to
+  - `TerrainLayerReader` — elevation as paged, hillshaded terrain tiles that keep subdividing past the data's resolution
+  - `VectorSource`, `VectorLayerReader` — OGR features in degrees (densify / simplify / clip helpers) and the paged, drapable line layers made from them
+  - `LayerOptions`, `LayerVisibility` — per-layer options (`path?key=value` specs, declared scales, LOD groups, styles) and the zoom rules that decide what is drawn
   - `TileSetBuilder` — GDAL + OSG tiler behind `tools/ivetiler`
   - `ViewerApp` — window, camera, base map and layer sources, the current `WorldView` and runtime switching, frame loop
 - `app/main.cpp` — thin command line viewer
 - `tools/ivetiler/` — tile pyramid generator
-- `tests/` — Google Test suite (`ctest` in the build directory, or CLion's test runner)
-- `data/` — base map image and the script that regenerates it (see `data/README.md`)
+- `tests/` — Google Test suite (`ctest` in the build directory, or CLion's test runner); the fixtures use per-test temporary directories, so `ctest -j` is safe
+- `data/` — base map image and the script that regenerates it (see `data/README.md`), plus `fetch_natural_earth.sh` (boundary shapefiles at three scales) and `fetch_dted_sample.sh` (genuine DTED cells made from Copernicus DEM tiles)
 - `lib/.../TileGrid`, `TileSource`, `TileLayerReader` — any-CRS tile matrix sets, GDAL raster and tile directory sources, and the reader that pages them as textured tiles in the display frame
 - `lib/.../VsgReproject` — reprojection of VSG scene graphs and the `.vsgb` / `.vsgt` reader that applies it
 - `lib/.../TileGeometry`, `TextureCompress` — textured tile meshes and their shared pipeline (used by the on-the-fly reader and the `vsgb` tiler), BC1 texture compression with mip chains

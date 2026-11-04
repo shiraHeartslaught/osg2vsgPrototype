@@ -24,6 +24,7 @@ namespace ivevsg
         double altitude = 2.0e7; // metres from that point to the eye
         double heading = 0.0;    // degrees clockwise from north that the top of the screen points to
         double tilt = 0.0;       // degrees the view is tipped from straight down (0) towards the horizon
+        double groundHeight = 0.0; // metres above the ellipsoid of the ground under the screen centre (terrain); the altitude counts from it
     };
 
     struct GlobeNavigationSettings
@@ -109,6 +110,10 @@ namespace ivevsg
         const Projection& globe() const { return *_globe; }
         double viewportWidth() const;
         double viewportHeight() const;
+
+        /// Height of the terrain under the screen centre: the camera keeps its altitude above it.
+        void setGroundHeight(double metres);
+        double groundHeight() const { return _current.groundHeight; }
 
         using PointerPosition = MapNavigationHandler::PointerPosition;
         PointerPosition lastPointer() const { return {_lastX, _lastY, _havePointer}; }

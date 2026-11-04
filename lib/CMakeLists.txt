@@ -13,11 +13,14 @@ add_library(ivevsg
     src/BaseMap.cpp
     src/CameraFraming.cpp
     src/CrsTransform.cpp
+    src/ElevationSource.cpp
     src/FileDialog.cpp
     src/GeocentricProjection.cpp
     src/GlobeNavigation.cpp
     src/GlobeView.cpp
     src/Hud.cpp
+    src/LayerOptions.cpp
+    src/LayerVisibility.cpp
     src/MapNavigation.cpp
     src/MapScene.cpp
     src/MercatorProjection.cpp
@@ -27,6 +30,7 @@ add_library(ivevsg
     src/Projection.cpp
     src/SceneBounds.cpp
     src/SceneLoader.cpp
+    src/TerrainLayerReader.cpp
     src/TileScheme.cpp
     src/TextureCompress.cpp
     src/TileGeometry.cpp
@@ -35,6 +39,8 @@ add_library(ivevsg
     src/TileSource.cpp
     src/TileSetBuilder.cpp
     src/TrackballView.cpp
+    src/VectorLayerReader.cpp
+    src/VectorSource.cpp
     src/VsgReproject.cpp
     src/ViewerApp.cpp
     src/WorldView.cpp

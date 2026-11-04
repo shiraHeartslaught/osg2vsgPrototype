@@ -28,10 +28,19 @@ namespace ivevsg
 
     void AsyncLayerLoader::request(const std::string& path, const std::string& name, const std::string& sourceCrs)
     {
-        std::string layerName = name.empty() ? vsg::simpleFilename(vsg::Path(path)).string() : name;
+        LayerSource source;
+        source.path = path;
+        source.name = name;
+        source.sourceCrs = sourceCrs;
+        request(source);
+    }
+
+    void AsyncLayerLoader::request(const LayerSource& requested)
+    {
+        LayerSource source = requested;
+        if (source.name.empty()) source.name = vsg::simpleFilename(vsg::Path(source.path)).string();
         auto loader = _loader;
         auto compile = _compile;
-        const LayerSource source{path, layerName, sourceCrs};
 
         auto future = std::async(std::launch::async, [loader, compile, source]() -> LayerLoadOutcome {
             const auto start = std::chrono::steady_clock::now();
@@ -45,7 +54,7 @@ namespace ivevsg
             }
             else
             {
-                const LoadResult loaded = loader->load(source.path, source.sourceCrs);
+                const LoadResult loaded = loader->load(source);
                 if (!loaded)
                 {
                     outcome.error = loaded.error;
@@ -55,6 +64,12 @@ namespace ivevsg
                     outcome.node = loaded.node;
                     outcome.sourceCrs = loaded.sourceCrs;
                     outcome.targetCrs = loaded.targetCrs;
+                    outcome.kind = loaded.kind;
+                    outcome.info = loaded.info;
+                    outcome.declaredScale = loaded.declaredScale;
+                    outcome.nativeLevel = loaded.nativeLevel;
+                    outcome.maxLevel = loaded.maxLevel;
+                    outcome.terrainRegistryId = loaded.terrainRegistryId;
                     if (compile)
                     {
                         try

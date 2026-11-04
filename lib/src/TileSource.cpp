@@ -1,3 +1,4 @@
+#include <ivevsg/CrsTransform.h>
 #include <ivevsg/TileSource.h>
 
 #include <cpl_conv.h>
@@ -23,8 +24,7 @@ namespace ivevsg
     {
         void ensureGdal()
         {
-            static std::once_flag once;
-            std::call_once(once, [] { GDALAllRegister(); });
+            ensureGdalRegistered(); // one registration for the whole process, whichever module gets there first
         }
 
         std::string wellKnownText(const std::string& userInput)

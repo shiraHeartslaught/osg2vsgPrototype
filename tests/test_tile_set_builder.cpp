@@ -67,7 +67,7 @@ namespace
     protected:
         void SetUp() override
         {
-            dir = std::filesystem::temp_directory_path() / "ivevsg_tileset_test";
+            dir = std::filesystem::temp_directory_path() / ("ivevsg_tileset_test_" + std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()));
             std::filesystem::remove_all(dir);
             std::filesystem::create_directories(dir);
             source = writeSyntheticWorld(dir);

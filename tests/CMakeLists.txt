@@ -9,8 +9,10 @@ add_executable(ivevsg_tests
     test_osg_reader.cpp
     test_reproject.cpp
     test_camera_framing.cpp
+    test_elevation.cpp
     test_geocentric.cpp
     test_globe_navigation.cpp
+    test_layer_visibility.cpp
     test_scene_bounds.cpp
     test_scene_loader.cpp
     test_tile_scheme.cpp
@@ -18,6 +20,7 @@ add_executable(ivevsg_tests
     test_tile_grid.cpp
     test_tile_layer.cpp
     test_tile_set_builder.cpp
+    test_vector_layer.cpp
     test_vsg_reproject.cpp
     test_world_view.cpp
 )

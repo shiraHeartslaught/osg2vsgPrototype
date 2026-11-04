@@ -81,6 +81,11 @@ namespace ivevsg
         virtual double minZoomLevel() const = 0;
         virtual double maxZoomLevel() const = 0;
 
+        /// Height of the ground under the screen centre above the projection surface (terrain): the
+        /// camera's altitude counts from there, so it never sinks into a mountain. 0 = the bare surface.
+        virtual void setSurfaceHeight(double /*metres*/) {}
+        virtual double surfaceHeight() const { return 0.0; }
+
         /// One line per control, for a panel or the console.
         virtual std::vector<std::string> controls() const = 0;
     };

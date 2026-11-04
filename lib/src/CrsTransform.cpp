@@ -1,6 +1,7 @@
 #include <ivevsg/CrsTransform.h>
 
 #include <cpl_conv.h>
+#include <gdal.h>
 #include <ogr_spatialref.h>
 #include <ogr_srs_api.h>
 
@@ -41,6 +42,13 @@ namespace ivevsg
             });
         }
     } // namespace
+
+    void ensureGdalRegistered()
+    {
+        ensureGisDataPaths();
+        static std::once_flag once;
+        std::call_once(once, [] { GDALAllRegister(); });
+    }
 
     struct CrsTransform::Impl
     {

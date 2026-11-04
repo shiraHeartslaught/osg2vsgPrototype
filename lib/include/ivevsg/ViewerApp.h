@@ -1,6 +1,8 @@
 #pragma once
 
 #include <ivevsg/AsyncLayerLoader.h>
+#include <ivevsg/ElevationSource.h>
+#include <ivevsg/LayerVisibility.h>
 #include <ivevsg/MapScene.h>
 #include <ivevsg/Projection.h>
 #include <ivevsg/WorldView.h>
@@ -16,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,6 +45,8 @@ namespace ivevsg
         int maxFrames = -1;                    // >= 0 stops after that many frames (smoke tests, screenshots)
         std::string defaultSourceCrs = "EPSG:3857"; // CRS assumed for OSG files that do not name one
         bool logReads = false;                      // print every file the loaders read
+        VisibilitySettings visibility;              // global zoom floor, draping, resolution tolerance
+        int vectorMaxLevel = 16;                    // deepest tile level vector layers page to
     };
 
     /// The base map for one view: a tile pyramid root, or (flat maps only) one image. Both empty = none.
@@ -66,6 +71,9 @@ namespace ivevsg
     /// in whichever WorldView is current. The view (projection, navigation, scene assembly) can be
     /// swapped at runtime: the layers are reloaded into the new frame from their recorded sources, the
     /// camera is handed over at the same place and altitude, and nothing else needs to change.
+    ///
+    /// Every frame the zoom rules decide which layers are drawn (zoom windows, the global floor, LOD
+    /// groups of declared scales), and the camera is kept above whatever terrain layers are loaded.
     class ViewerApp
     {
     public:
@@ -81,6 +89,7 @@ namespace ivevsg
 
         /// Adds a layer above the base. Before initialize() it is loaded during initialize() (the first
         /// one frames the start view); afterwards it loads on the calling thread, pausing rendering.
+        /// The path may carry options ("file.shp?minzoom=3&scale=50m", see parseLayerSpec).
         /// Returns false with lastLayerError() set when the load fails.
         bool addLayer(LayerSource source);
 
@@ -89,12 +98,35 @@ namespace ivevsg
         /// rendering is never interrupted. Progress is visible through loadingLayers(), completion
         /// through onLayerLoaded and lastLayerError().
         void queueLayerLoad(LayerSource source);
-        void queueLayerLoad(const std::string& path, const std::string& name = {}) { queueLayerLoad(LayerSource{path, name, {}}); }
+        void queueLayerLoad(const std::string& path, const std::string& name = {}) { queueLayerLoad(LayerSource{path, name, {}, {}}); }
         bool removeLayer(std::size_t index);
+        /// Removes a layer and loads it again from its (possibly edited) source, on a worker thread.
+        bool reloadLayer(std::size_t index);
+        /// Reloads every vector layer (after terrain or draping changed).
+        void reloadVectorLayers();
+
+        /// Live edits of a vector layer's look (also recorded in its source for reloads).
+        void setLayerColour(std::size_t index, const vsg::vec4& colour);
+        void setLayerLineWidth(std::size_t index, float pixels);
 
         std::vector<std::string> loadingLayers() const;
         const std::string& lastLayerError() const { return _lastLayerError; }
         std::function<void(const std::string& name, bool ok, const std::string& error, double seconds)> onLayerLoaded;
+
+        // ---- visibility rules and terrain --------------------------------------------------------
+
+        const VisibilitySettings& visibility() const { return _settings.visibility; }
+        /// Changing draping (on/off or its level) reloads the vector layers so their tiles pick it up.
+        void setVisibility(const VisibilitySettings& settings);
+        /// The zoom rules' verdict for each layer, as of the last frame.
+        const std::vector<LayerVisibilityResult>& layerVisibility() const { return _layerVisibility; }
+
+        /// The terrain layers currently loaded (shared with the loaders).
+        vsg::ref_ptr<ElevationRegistry> elevation() const { return _elevation; }
+        /// Height (exaggerated) of the terrain under a point, if any terrain covers it.
+        std::optional<double> terrainHeightAt(double longitude, double latitude) const;
+        /// Whether the Vulkan device draws lines wider than one pixel.
+        bool wideLinesSupported() const { return _wideLines; }
 
         // ---- window and views --------------------------------------------------------------------
 
@@ -131,13 +163,19 @@ namespace ivevsg
         double zoomLevel() const;
         /// Zoom limits, kept and applied to every view the app switches to.
         void setZoomLevelRange(double minZoomLevel, double maxZoomLevel);
+        /// A ceiling for one view only ("globe": how far in the globe may be zoomed), over the shared range.
+        void setViewMaxZoomLevel(const std::string& viewKey, double maxZoomLevel);
+        double viewMaxZoomLevel(const std::string& viewKey) const;
+        double minZoomLevel() const { return _minZoomLevel; }
         ViewState viewState() const;
         /// Called from frame() whenever the view's state changed.
         std::function<void(const ViewState& state)> onViewChanged;
 
-        /// Fraction of the camera altitude each successive data layer is lifted by (see LayerStack::setLayerHeight),
-        /// and the fraction the base map is kept below the data surface (see the frame loop).
-        double layerSeparationFraction = 0.005;
+        /// Ground pixels (at the view's current resolution) each successive data layer is lifted by, so
+        /// coincident layers never z-fight yet stay where they belong even on a tilted globe (see
+        /// LayerStack::setLayerHeight), and the fraction of the camera altitude the base map is kept
+        /// below the data surface (see the frame loop).
+        double layerSeparationPixels = 2.0;
         double underlayDepthFraction = 0.02;
 
         /// Runs one frame. Returns false once the viewer closes or maxFrames is reached.
@@ -162,6 +200,11 @@ namespace ivevsg
         void installView(const ViewState* carryOver);
         void uninstallView();
         void startAsyncLoader();
+        void applyZoomRange();
+        void applyVisibility(double zoom);
+        void followTerrain(const ViewState& state);
+        void addLoadedLayer(const LayerSource& source, const std::string& name, vsg::ref_ptr<vsg::Node> node, const std::string& sourceCrs, const std::string& targetCrs,
+                            const std::string& kind, const std::string& info, double declaredScale, int nativeLevel, int maxLevel, unsigned terrainRegistryId);
         double viewportAspect() const;
 
         ViewerSettings _settings;
@@ -172,6 +215,7 @@ namespace ivevsg
         std::string _pendingViewKey;             // requestViewSwitch(), applied in frame()
         bool _haveZoomRange = false;
         double _minZoomLevel = 0.0, _maxZoomLevel = 28.0;
+        std::map<std::string, double> _viewMaxZoom; // per-view ceilings
         std::string _lastSwitchError;
 
         vsg::ref_ptr<vsg::Viewer> _viewer;
@@ -184,9 +228,11 @@ namespace ivevsg
         vsg::ref_ptr<vsg::MatrixTransform> _underlay;
         vsg::ref_ptr<vsgImGui::RenderImGui> _imgui;
         std::vector<std::function<bool()>> _pendingPanels;
+        bool _wideLines = false;
 
         std::shared_ptr<SceneLoader> _loader;
         std::shared_ptr<LayerStack> _layers;
+        vsg::ref_ptr<ElevationRegistry> _elevation; // outlives every loader, so terrain survives view switches
         std::vector<LayerSource> _pendingLayerLoads; // queued until the viewer can compile
         std::unique_ptr<AsyncLayerLoader> _asyncLoader;
         std::vector<std::unique_ptr<AsyncLayerLoader>> _retiredLoaders; // loads of a previous view, drained and dropped
@@ -196,6 +242,9 @@ namespace ivevsg
         std::vector<std::pair<int, vsg::ref_ptr<vsg::Object>>> _retiredNodes;
         void retire(vsg::ref_ptr<vsg::Object> node);
         std::string _lastLayerError;
+        std::vector<LayerVisibilityResult> _layerVisibility;
+        bool _terrainChanged = false; // a terrain layer came or went: vector layers re-drape next frame
+        double _lastTerrainLongitude = 1e9, _lastTerrainLatitude = 1e9;
 
         vsg::dbox _bounds;
         ViewState _lastReportedState;

@@ -1,4 +1,5 @@
 #include <ivevsg/BaseMap.h>
+#include <ivevsg/LoaderKeys.h>
 #include <ivevsg/SceneBounds.h>
 #include <ivevsg/SceneLoader.h>
 #include <ivevsg/ViewerApp.h>
@@ -15,7 +16,8 @@ namespace ivevsg
 {
     ViewerApp::ViewerApp(ViewerSettings settings, std::unique_ptr<WorldView> view) :
         _settings(std::move(settings)),
-        _view(std::move(view))
+        _view(std::move(view)),
+        _elevation(ElevationRegistry::create())
     {
         if (!_view) _view = createWorldView("mercator", _settings.views);
     }
@@ -46,6 +48,13 @@ namespace ivevsg
 
     bool ViewerApp::addLayer(LayerSource source)
     {
+        std::string specError;
+        if (!applyLayerSpec(source, specError))
+        {
+            _lastLayerError = specError;
+            std::cerr << "layer options: " << specError << "\n";
+            return false;
+        }
         if (source.name.empty()) source.name = vsg::simpleFilename(vsg::Path(source.path)).string();
         if (!_viewer)
         {
@@ -58,6 +67,13 @@ namespace ivevsg
 
     void ViewerApp::queueLayerLoad(LayerSource source)
     {
+        std::string specError;
+        if (!applyLayerSpec(source, specError))
+        {
+            _lastLayerError = specError;
+            std::cerr << "layer options: " << specError << "\n";
+            return;
+        }
         if (source.name.empty()) source.name = vsg::simpleFilename(vsg::Path(source.path)).string();
         _pendingLayerLoads.push_back(std::move(source));
     }
@@ -65,8 +81,55 @@ namespace ivevsg
     bool ViewerApp::removeLayer(std::size_t index)
     {
         if (!_layers || index >= _layers->layerCount()) return false;
-        retire(_layers->layer(index).placement); // its pipelines and textures outlive the frames still drawing them
+        const Layer& layer = _layers->layer(index);
+        if (layer.kind == "terrain") _terrainChanged = true; // vector layers lose their ground: re-drape
+        retire(layer.placement); // its pipelines and textures outlive the frames still drawing them
         return _layers->removeLayer(index);
+    }
+
+    bool ViewerApp::reloadLayer(std::size_t index)
+    {
+        if (!_layers || index >= _layers->layerCount()) return false;
+        LayerSource source = _layers->layer(index).source;
+        if (!removeLayer(index)) return false;
+        _pendingLayerLoads.push_back(std::move(source));
+        return true;
+    }
+
+    void ViewerApp::reloadVectorLayers()
+    {
+        if (!_layers) return;
+        std::vector<LayerSource> sources;
+        for (std::size_t i = _layers->layerCount(); i-- > 0;)
+        {
+            if (_layers->layer(i).kind != "vector") continue;
+            sources.insert(sources.begin(), _layers->layer(i).source);
+            removeLayer(i);
+        }
+        for (LayerSource& source : sources) _pendingLayerLoads.push_back(std::move(source));
+    }
+
+    void ViewerApp::setLayerColour(std::size_t index, const vsg::vec4& colour)
+    {
+        if (!_layers || index >= _layers->layerCount()) return;
+        Layer& layer = _layers->layer(index);
+        layer.source.options.vector.colour = colour;
+        if (!layer.node) return;
+        if (auto colours = layer.node->getRefObject<vsg::vec4Array>(loaderKeys::nodeVectorColour))
+        {
+            colours->set(0, colour);
+            colours->dirty();
+        }
+    }
+
+    void ViewerApp::setLayerLineWidth(std::size_t index, float pixels)
+    {
+        if (!_layers || index >= _layers->layerCount()) return;
+        Layer& layer = _layers->layer(index);
+        layer.source.options.vector.lineWidth = pixels;
+        if (!layer.node) return;
+        if (auto width = layer.node->getRefObject<vsg::SetLineWidth>(loaderKeys::nodeVectorLineWidth))
+            width->lineWidth = _wideLines ? std::clamp(pixels, 1.0f, 32.0f) : 1.0f;
     }
 
     std::vector<std::string> ViewerApp::loadingLayers() const
@@ -80,6 +143,30 @@ namespace ivevsg
         return names;
     }
 
+    void ViewerApp::addLoadedLayer(const LayerSource& source, const std::string& name, vsg::ref_ptr<vsg::Node> node, const std::string& sourceCrs, const std::string& targetCrs,
+                                   const std::string& kind, const std::string& info, double declaredScale, int nativeLevel, int maxLevel, unsigned terrainRegistryId)
+    {
+        if (!_layers) return;
+        Layer layer;
+        layer.name = name;
+        layer.node = node;
+        layer.source = source;
+        layer.sourceCrs = sourceCrs;
+        layer.targetCrs = targetCrs;
+        layer.kind = kind;
+        layer.info = info;
+        layer.declaredScale = declaredScale;
+        layer.nativeLevel = nativeLevel;
+        layer.maxLevel = maxLevel;
+        layer.terrainRegistryId = terrainRegistryId;
+        _layers->addLayer(std::move(layer));
+        if (kind == "terrain")
+        {
+            _terrainChanged = true; // vector layers already shown can now drape over it
+            _lastTerrainLongitude = _lastTerrainLatitude = 1e9;
+        }
+    }
+
     bool ViewerApp::loadLayerNow(const LayerSource& source, std::string& error)
     {
         if (!_layers || !_loader)
@@ -87,7 +174,7 @@ namespace ivevsg
             error = "no scene yet";
             return false;
         }
-        const LoadResult loaded = _loader->load(source.path, source.sourceCrs);
+        const LoadResult loaded = _loader->load(source);
         if (!loaded)
         {
             error = loaded.error;
@@ -106,14 +193,70 @@ namespace ivevsg
                 return false;
             }
         }
-        Layer layer;
-        layer.name = source.name;
-        layer.node = loaded.node;
-        layer.source = source;
-        layer.sourceCrs = loaded.sourceCrs;
-        layer.targetCrs = loaded.targetCrs;
-        _layers->addLayer(std::move(layer));
+        addLoadedLayer(source, source.name, loaded.node, loaded.sourceCrs, loaded.targetCrs, loaded.kind, loaded.info, loaded.declaredScale, loaded.nativeLevel, loaded.maxLevel, loaded.terrainRegistryId);
         return true;
+    }
+
+    // ---- visibility rules and terrain -----------------------------------------------------------
+
+    void ViewerApp::setVisibility(const VisibilitySettings& settings)
+    {
+        const bool drapeChanged = settings.drape != _settings.visibility.drape || settings.drapeMinZoom != _settings.visibility.drapeMinZoom;
+        _settings.visibility = settings;
+        if (_loader)
+        {
+            _loader->options()->setValue(loaderKeys::drape, settings.drape);
+            _loader->options()->setValue(loaderKeys::drapeMinZoom, settings.drapeMinZoom);
+        }
+        if (drapeChanged) reloadVectorLayers();
+    }
+
+    std::optional<double> ViewerApp::terrainHeightAt(double longitude, double latitude) const
+    {
+        return _elevation ? _elevation->heightAt(longitude, latitude) : std::nullopt;
+    }
+
+    void ViewerApp::applyVisibility(double zoom)
+    {
+        if (!_layers) return;
+        std::vector<LayerVisibilityInput> inputs;
+        inputs.reserve(_layers->layerCount());
+        for (std::size_t i = 0; i < _layers->layerCount(); ++i)
+        {
+            const Layer& layer = _layers->layer(i);
+            LayerVisibilityInput in;
+            in.userVisible = layer.visible;
+            in.minZoom = layer.source.options.minZoom;
+            in.maxZoom = layer.source.options.maxZoom;
+            in.scaleDenominator = layer.effectiveScaleDenominator();
+            in.lodGroup = layer.effectiveLodGroup();
+            inputs.push_back(in);
+        }
+        _layerVisibility = evaluateLayerVisibility(inputs, zoom, _settings.visibility);
+        for (std::size_t i = 0; i < _layers->layerCount(); ++i)
+        {
+            // zoomAllowed carries the rules' verdict; the user's toggle is applied by the stack itself
+            // (a layer the user switched off counts as allowed, so it reappears the moment it is switched on)
+            _layers->setLayerZoomAllowed(i, inputs[i].userVisible ? _layerVisibility[i].shown : true);
+            const Layer& layer = _layers->layer(i);
+            if (layer.kind == "terrain" && layer.terrainRegistryId && _elevation) _elevation->setEnabled(layer.terrainRegistryId, _layers->layerShown(i));
+        }
+    }
+
+    void ViewerApp::followTerrain(const ViewState& state)
+    {
+        if (!_view) return;
+        if (!_elevation || !_elevation->hasTerrain())
+        {
+            if (_view->surfaceHeight() != 0.0) _view->setSurfaceHeight(0.0);
+            _lastTerrainLongitude = _lastTerrainLatitude = 1e9;
+            return;
+        }
+        if (state.centre.longitude == _lastTerrainLongitude && state.centre.latitude == _lastTerrainLatitude) return;
+        _lastTerrainLongitude = state.centre.longitude;
+        _lastTerrainLatitude = state.centre.latitude;
+        const std::optional<double> height = _elevation->heightAt(state.centre.longitude, state.centre.latitude);
+        _view->setSurfaceHeight(height ? *height : 0.0);
     }
 
     // ---- scene assembly --------------------------------------------------------------------------
@@ -136,8 +279,14 @@ namespace ivevsg
         loaderSettings.targetCrs = _view->projection()->crs();
         loaderSettings.defaultSourceCrs = _settings.defaultSourceCrs;
         loaderSettings.quadTessellation = _view->quadTessellation();
+        loaderSettings.elevation = _elevation;
+        loaderSettings.drape = _settings.visibility.drape;
+        loaderSettings.drapeMinZoom = _settings.visibility.drapeMinZoom;
+        loaderSettings.vectorMaxLevel = _settings.vectorMaxLevel;
+        loaderSettings.wideLines = _wideLines;
         _loader = std::make_shared<SceneLoader>(loaderSettings);
         _layers = std::make_shared<LayerStack>();
+        _layerVisibility.clear();
         _underlay = vsg::MatrixTransform::create();
         _baseInfo = BaseInfo{};
 
@@ -213,11 +362,18 @@ namespace ivevsg
             _pendingPanels.push_back(std::move(panel));
     }
 
+    void ViewerApp::applyZoomRange()
+    {
+        if (!_view) return;
+        _haveZoomRange = true;
+        _view->setZoomLevelRange(_minZoomLevel, viewMaxZoomLevel(_view->key()));
+    }
+
     void ViewerApp::installView(const ViewState* carryOver)
     {
         if (!_viewer || !_camera) return;
         _view->attach(_camera, _bounds, _settings.framingElevationDegrees);
-        if (_haveZoomRange) _view->setZoomLevelRange(_minZoomLevel, _maxZoomLevel);
+        if (_haveZoomRange) applyZoomRange();
         if (carryOver)
         {
             _view->lookAt(carryOver->centre, carryOver->altitude);
@@ -225,6 +381,7 @@ namespace ivevsg
         }
         if (auto handler = _view->eventHandler()) _viewer->addEventHandler(handler); // after ImGui and the close handler
         _reportedOnce = false;
+        _lastTerrainLongitude = _lastTerrainLatitude = 1e9;
     }
 
     void ViewerApp::uninstallView()
@@ -265,6 +422,18 @@ namespace ivevsg
                 return false;
             }
             _viewer->addWindow(_window);
+
+            // lines wider than a pixel need the wideLines device feature: ask for it when the device has
+            // it (the logical device is created later, from these traits)
+            if (auto physicalDevice = _window->getOrCreatePhysicalDevice())
+            {
+                if (physicalDevice->getFeatures().wideLines)
+                {
+                    if (!traits->deviceFeatures) traits->deviceFeatures = vsg::DeviceFeatures::create();
+                    traits->deviceFeatures->get().wideLines = VK_TRUE;
+                    _wideLines = true;
+                }
+            }
 
             std::string error;
             if (!buildScene(error))
@@ -410,6 +579,7 @@ namespace ivevsg
         startAsyncLoader();
         for (const LayerSource& source : sources) _pendingLayerLoads.push_back(source);
         _lastLayerError.clear();
+        _terrainChanged = false;
         if (onViewSwitched) onViewSwitched(*_view);
         return true;
     }
@@ -443,10 +613,21 @@ namespace ivevsg
 
     void ViewerApp::setZoomLevelRange(double minZoomLevel, double maxZoomLevel)
     {
-        _haveZoomRange = true;
         _minZoomLevel = minZoomLevel;
         _maxZoomLevel = maxZoomLevel;
-        _view->setZoomLevelRange(minZoomLevel, maxZoomLevel);
+        applyZoomRange();
+    }
+
+    void ViewerApp::setViewMaxZoomLevel(const std::string& viewKey, double maxZoomLevel)
+    {
+        _viewMaxZoom[viewKey] = maxZoomLevel;
+        if (_view && _view->key() == viewKey) applyZoomRange();
+    }
+
+    double ViewerApp::viewMaxZoomLevel(const std::string& viewKey) const
+    {
+        auto it = _viewMaxZoom.find(viewKey);
+        return it == _viewMaxZoom.end() ? _maxZoomLevel : it->second;
     }
 
     // ---- frame loop ------------------------------------------------------------------------------
@@ -485,13 +666,8 @@ namespace ivevsg
                 if (outcome.ok())
                 {
                     if (outcome.compileResult) vsg::updateViewer(*_viewer, outcome.compileResult); // main thread: registers pager/descriptor needs
-                    Layer layer;
-                    layer.name = outcome.name;
-                    layer.node = outcome.node;
-                    layer.source = outcome.source;
-                    layer.sourceCrs = outcome.sourceCrs;
-                    layer.targetCrs = outcome.targetCrs;
-                    if (_layers) _layers->addLayer(std::move(layer));
+                    addLoadedLayer(outcome.source, outcome.name, outcome.node, outcome.sourceCrs, outcome.targetCrs, outcome.kind, outcome.info, outcome.declaredScale,
+                                   outcome.nativeLevel, outcome.maxLevel, outcome.terrainRegistryId);
                     _lastLayerError.clear();
                 }
                 else
@@ -508,19 +684,29 @@ namespace ivevsg
             (*it)->takeCompleted();
             it = ((*it)->pendingCount() == 0) ? _retiredLoaders.erase(it) : it + 1;
         }
+        // terrain came or went: vector layers are rebuilt so their tiles (re)drape
+        if (_terrainChanged)
+        {
+            _terrainChanged = false;
+            if (_settings.visibility.drape) reloadVectorLayers();
+        }
 
         const ViewState state = _view->state();
+        applyVisibility(state.zoomLevel);
+        followTerrain(state);
         {
             const double altitude = std::max(1.0, state.altitude);
             const Projection& projection = *_view->projection();
             // keep the underlay a fixed fraction of the eye height below the data surface (z on a map,
             // radially on a globe) ...
             if (_underlay) _underlay->matrix = projection.layerOffsetTransform(-std::max(1.0, altitude * underlayDepthFraction));
-            // ... and each further data layer a little above the previous one, so overlaps never z-fight
+            // ... and each further data layer a couple of ground pixels above the previous one, so overlaps
+            // never z-fight (a fraction of the altitude would show as a visible lift on a tilted globe)
             if (_layers)
             {
+                const double step = std::max(0.5, std::max(state.metersPerPixel, 1e-6) * layerSeparationPixels);
                 for (std::size_t i = 1; i < _layers->layerCount(); ++i)
-                    _layers->setLayerOffset(i, projection.layerOffsetTransform(std::max(0.5, altitude * layerSeparationFraction) * static_cast<double>(i)));
+                    _layers->setLayerOffset(i, projection.layerOffsetTransform(step * static_cast<double>(i)));
             }
         }
         if (onViewChanged)

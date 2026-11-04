@@ -375,3 +375,24 @@ TEST(MapNavigationHandler, LeavesEventsAlreadyHandledAlone)
     EXPECT_DOUBLE_EQ(pointer.x, 500.0);
     EXPECT_DOUBLE_EQ(pointer.y, 340.0);
 }
+
+TEST(MapNavigationTerrain, GroundHeightMovesTheCameraUpWithTheTerrain)
+{
+    auto lookAt = vsg::LookAt::create(vsg::dvec3(0.0, 0.0, 10000.0), vsg::dvec3(0.0, 0.0, 0.0), vsg::dvec3(0.0, 1.0, 0.0));
+    auto perspective = vsg::Perspective::create(30.0, 4.0 / 3.0, 1.0, 1.0e8);
+    auto camera = vsg::Camera::create(perspective, lookAt, vsg::ViewportState::create(VkExtent2D{800, 600}));
+    auto handler = ivevsg::MapNavigationHandler::create(camera);
+    EXPECT_EQ(handler->groundHeight(), 0.0);
+    const double altitude = handler->mapCamera().altitude;
+    EXPECT_NEAR(altitude, 10000.0, 1e-6);
+
+    handler->setGroundHeight(1500.0);
+    EXPECT_EQ(handler->groundHeight(), 1500.0);
+    EXPECT_NEAR(handler->mapCamera().altitude, altitude, 1e-9) << "the altitude above the ground is unchanged";
+    EXPECT_NEAR(lookAt->eye.z, 1500.0 + altitude, 1e-6) << "the eye rides up with the terrain";
+    EXPECT_NEAR(lookAt->center.z, 1500.0, 1e-6);
+    EXPECT_NEAR(handler->zoomLevel(), ivevsg::zoomLevelForAltitude(altitude, 30.0, 600.0, 40075016.685578488), 1e-9) << "zoom is measured above the ground";
+
+    handler->setGroundHeight(0.0);
+    EXPECT_NEAR(lookAt->eye.z, altitude, 1e-6);
+}

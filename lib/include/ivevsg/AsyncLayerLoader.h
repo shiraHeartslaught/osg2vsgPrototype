@@ -25,6 +25,12 @@ namespace ivevsg
         LayerSource source;    // as requested
         std::string sourceCrs; // as resolved by the loader
         std::string targetCrs;
+        std::string kind;      // what the reader made of it ("terrain", "vector", "raster", "scene")
+        std::string info;
+        double declaredScale = 0.0;
+        int nativeLevel = -1;
+        int maxLevel = -1;
+        unsigned terrainRegistryId = 0;
         vsg::ref_ptr<vsg::Node> node;
         vsg::CompileResult compileResult; // from the compile step, to hand to vsg::updateViewer() on the main thread
         std::string error;
@@ -50,7 +56,8 @@ namespace ivevsg
 
         /// Starts loading; name defaults to the file's simple name, sourceCrs to what the file declares.
         void request(const std::string& path, const std::string& name = {}, const std::string& sourceCrs = {});
-        void request(const LayerSource& source) { request(source.path, source.name, source.sourceCrs); }
+        /// Starts loading with the source's options (kind, styles, zoom rules travel with the layer).
+        void request(const LayerSource& source);
 
         /// Finished loads, successful or not, removed from the queue. Never blocks.
         std::vector<LayerLoadOutcome> takeCompleted();

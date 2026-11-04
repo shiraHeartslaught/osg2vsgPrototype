@@ -12,6 +12,25 @@ namespace ivevsg
         return group;
     }
 
+    bool applyLayerSpec(LayerSource& source, std::string& error)
+    {
+        error.clear();
+        if (source.path.find('?') == std::string::npos) return true;
+        std::string path;
+        LayerOptions options = source.options;
+        if (!parseLayerSpec(source.path, path, options, error)) return false;
+        source.path = path;
+        source.options = options;
+        return true;
+    }
+
+    std::string Layer::effectiveLodGroup() const
+    {
+        if (!source.options.lodGroup.empty()) return source.options.lodGroup;
+        if (effectiveScaleDenominator() > 0.0) return lodGroupFromName(source.path);
+        return {};
+    }
+
     namespace
     {
         void setMask(vsg::ref_ptr<vsg::Switch> node, std::size_t index, bool visible)
@@ -61,6 +80,7 @@ namespace ivevsg
         if (layer.source.name.empty()) layer.source.name = layer.name;
         _switch->addChild(true, layer.placement);
         _layers.push_back(std::move(layer));
+        applyMask(_layers.size() - 1);
         return _layers.size() - 1;
     }
 
@@ -89,12 +109,37 @@ namespace ivevsg
         return true;
     }
 
+    void LayerStack::applyMask(std::size_t index)
+    {
+        if (index < _layers.size()) setMask(_switch, switchIndex(index), _layers[index].visible && _layers[index].zoomAllowed);
+    }
+
     void LayerStack::setLayerVisible(std::size_t index, bool visible)
     {
-        if (index < _layers.size()) setMask(_switch, switchIndex(index), visible);
+        if (index >= _layers.size()) return;
+        _layers[index].visible = visible;
+        applyMask(index);
     }
 
     bool LayerStack::layerVisible(std::size_t index) const
+    {
+        return index < _layers.size() && _layers[index].visible;
+    }
+
+    void LayerStack::setLayerZoomAllowed(std::size_t index, bool allowed)
+    {
+        if (index >= _layers.size()) return;
+        if (_layers[index].zoomAllowed == allowed) return;
+        _layers[index].zoomAllowed = allowed;
+        applyMask(index);
+    }
+
+    bool LayerStack::layerZoomAllowed(std::size_t index) const
+    {
+        return index < _layers.size() && _layers[index].zoomAllowed;
+    }
+
+    bool LayerStack::layerShown(std::size_t index) const
     {
         return index < _layers.size() && maskOn(_switch, switchIndex(index));
     }

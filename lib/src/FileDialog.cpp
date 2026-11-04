@@ -12,10 +12,12 @@ namespace ivevsg
     std::vector<FileFilter> sceneFileFilters()
     {
         return {
-            {"Scene databases and rasters", "ive,vsgb,vsgt,osgb,osgt,osg,tif,tiff,vrt,jp2,img,xml"},
+            {"Scene databases, rasters, terrain and vectors", "ive,vsgb,vsgt,osgb,osgt,osg,tif,tiff,vrt,jp2,img,xml,dt0,dt1,dt2,hgt,shp,geojson,gpkg,kml"},
             {"OpenSceneGraph", "ive,osgb,osgt,osg"},
             {"VulkanSceneGraph", "vsgb,vsgt"},
-            {"Rasters (GeoTIFF, JPEG 2000, VRT, ...)", "tif,tiff,gtiff,vrt,jp2,j2k,img,ecw,sid,ntf,nitf,dem,hgt"},
+            {"Terrain (DTED, SRTM)", "dt0,dt1,dt2,hgt"},
+            {"Vectors (Shapefile, GeoJSON, GeoPackage, KML, ...)", "shp,shz,geojson,gpkg,kml,kmz,gml,fgb,tab,gpx"},
+            {"Rasters (GeoTIFF, JPEG 2000, VRT, ...)", "tif,tiff,gtiff,vrt,jp2,j2k,img,ecw,sid,ntf,nitf,dem"},
             {"Tile sets (tilemapresource.xml)", "xml"},
             {"3D models", "gltf,glb,obj,fbx,dae,3ds"},
         };

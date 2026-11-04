@@ -182,7 +182,7 @@ namespace
     protected:
         void SetUp() override
         {
-            dir = std::filesystem::temp_directory_path() / "ivevsg_tile_layer_test";
+            dir = std::filesystem::temp_directory_path() / ("ivevsg_tile_layer_test_" + std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()));
             std::filesystem::remove_all(dir);
             std::filesystem::create_directories(dir);
         }
@@ -483,8 +483,10 @@ TEST_F(TileLayerTest, ChildReadsOnManyThreadsSurviveTheLayerBeingDropped)
     const std::filesystem::path tif = writeRaster(dir / "stress.tif", 3857, vsg::dbox(vsg::dvec3(-kE, -kE, 0.0), vsg::dvec3(kE, kE, 0.0)), 2048, 2048, 30, 60, 90);
     ASSERT_FALSE(tif.empty());
     ivevsg::SceneLoader loader = loaderFor("EPSG:4978", 8);
-    auto reader = loader.options()->readerWriters[1].cast<ivevsg::TileLayerReader>();
-    ASSERT_TRUE(reader) << "the tile layer reader sits right after the load monitor";
+    vsg::ref_ptr<ivevsg::TileLayerReader> reader;
+    for (auto& candidate : loader.options()->readerWriters)
+        if (auto found = candidate.cast<ivevsg::TileLayerReader>()) reader = found;
+    ASSERT_TRUE(reader) << "the tile layer reader is part of the loader chain";
     ivevsg::LoadResult result = loader.load(tif.string());
     ASSERT_TRUE(result) << result.error;
     EXPECT_EQ(reader->openLayerCount(), 1u);

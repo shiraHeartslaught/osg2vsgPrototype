@@ -62,6 +62,7 @@ namespace ivevsg
         camera.longitude = target.longitude;
         camera.latitude = target.latitude;
         camera.altitude = altitudeMetres;
+        camera.groundHeight = _navigation->groundHeight();
         _navigation->setGlobeCamera(camera); // straight down, north up
     }
 
@@ -117,6 +118,16 @@ namespace ivevsg
     double GlobeView::maxZoomLevel() const
     {
         return _navigation ? _navigation->maxZoomLevel() : 28.0;
+    }
+
+    void GlobeView::setSurfaceHeight(double metres)
+    {
+        if (_navigation) _navigation->setGroundHeight(metres);
+    }
+
+    double GlobeView::surfaceHeight() const
+    {
+        return _navigation ? _navigation->groundHeight() : 0.0;
     }
 
     std::vector<std::string> GlobeView::controls() const

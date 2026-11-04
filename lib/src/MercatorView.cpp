@@ -121,6 +121,16 @@ namespace ivevsg
         return _navigation ? _navigation->maxZoomLevel() : 28.0;
     }
 
+    void MercatorView::setSurfaceHeight(double metres)
+    {
+        if (_navigation) _navigation->setGroundHeight(metres);
+    }
+
+    double MercatorView::surfaceHeight() const
+    {
+        return _navigation ? _navigation->groundHeight() : 0.0;
+    }
+
     std::vector<std::string> MercatorView::controls() const
     {
         return {"Drag = pan, wheel = zoom at cursor", "Arrows = pan, +/- = zoom, Home/Space = start view"};

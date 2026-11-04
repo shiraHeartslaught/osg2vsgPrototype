@@ -164,6 +164,13 @@ namespace ivevsg
         setMapCamera(_current); // re-clamp
     }
 
+    void MapNavigationHandler::setGroundHeight(double z)
+    {
+        if (_settings.groundHeight == z) return;
+        _settings.groundHeight = z;
+        applyToCamera();
+    }
+
     double MapNavigationHandler::minZoomLevel() const
     {
         return zoomLevelForAltitude(_settings.maxAltitude, _settings.fieldOfViewDegrees, viewportHeight(), _settings.worldWidthMetres);

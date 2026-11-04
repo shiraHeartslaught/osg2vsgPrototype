@@ -7,6 +7,11 @@
 
 namespace ivevsg
 {
+    /// Registers GDAL's drivers and points PROJ / GDAL at their data folders, exactly once for the
+    /// process and safely from any thread. Every module that opens a dataset calls it first; the
+    /// driver manager is not safe against two threads registering at the same time.
+    void ensureGdalRegistered();
+
     /// Converts coordinates of any GDAL-known coordinate reference system ("EPSG:3857", "EPSG:4978",
     /// a WKT string, ...) to geographic WGS84 (longitude, latitude in degrees, height in metres),
     /// which every Projection accepts. Built on OGR, so it understands whatever GDAL does.
