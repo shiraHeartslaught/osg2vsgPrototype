@@ -20,7 +20,7 @@ namespace ivevsg
         LayerOptions options = source.options;
         if (!parseLayerSpec(source.path, path, options, error)) return false;
         source.path = path;
-        source.options = options;
+        source.options = std::move(options);
         return true;
     }
 
@@ -132,11 +132,6 @@ namespace ivevsg
         if (_layers[index].zoomAllowed == allowed) return;
         _layers[index].zoomAllowed = allowed;
         applyMask(index);
-    }
-
-    bool LayerStack::layerZoomAllowed(std::size_t index) const
-    {
-        return index < _layers.size() && _layers[index].zoomAllowed;
     }
 
     bool LayerStack::layerShown(std::size_t index) const

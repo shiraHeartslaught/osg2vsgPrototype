@@ -31,7 +31,7 @@ namespace ivevsg
     {
     public:
         TileLayerReader();
-        ~TileLayerReader();
+        ~TileLayerReader() override;
 
         /// Raster formats handled by extension (".tif", ".tiff", ".vrt", ".jp2", ".img", ...).
         static bool handlesRaster(const vsg::Path& filename);

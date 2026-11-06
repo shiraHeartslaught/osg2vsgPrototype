@@ -94,6 +94,17 @@ namespace ivevsg
     class ElevationRegistry : public vsg::Inherit<vsg::Object, ElevationRegistry>
     {
     public:
+        unsigned add(const std::shared_ptr<const ElevationSource>& source, double exaggeration);
+        void remove(unsigned id);
+        void setEnabled(unsigned id, bool enabled);
+
+        /// Height (exaggeration applied) from the finest enabled source covering the point.
+        std::optional<double> heightAt(double longitude, double latitude) const;
+        /// Whether any enabled source is alive.
+        bool hasTerrain() const;
+        std::size_t size() const;
+
+    private:
         struct Entry
         {
             unsigned id = 0;
@@ -102,19 +113,6 @@ namespace ivevsg
             bool enabled = true;
         };
 
-        unsigned add(std::shared_ptr<const ElevationSource> source, double exaggeration);
-        void remove(unsigned id);
-        void setEnabled(unsigned id, bool enabled);
-        void setExaggeration(unsigned id, double exaggeration);
-
-        /// Height (exaggeration applied) from the finest enabled source covering the point.
-        std::optional<double> heightAt(double longitude, double latitude) const;
-        /// Whether any enabled source is alive.
-        bool hasTerrain() const;
-        std::size_t size() const;
-        std::vector<Entry> entries() const;
-
-    private:
         mutable std::mutex _mutex;
         std::vector<Entry> _entries;
         unsigned _nextId = 1;

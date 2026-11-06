@@ -83,7 +83,6 @@ namespace ivevsg
         bool layerVisible(std::size_t index) const;
         /// The zoom rules' verdict; the layer is drawn when both are true.
         void setLayerZoomAllowed(std::size_t index, bool allowed);
-        bool layerZoomAllowed(std::size_t index) const;
         /// Whether the layer is actually drawn.
         bool layerShown(std::size_t index) const;
 

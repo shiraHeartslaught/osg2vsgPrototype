@@ -81,7 +81,11 @@ namespace
             rgb[i * 3 + 1] = g;
             rgb[i * 3 + 2] = b;
         }
-        image->RasterIO(GF_Write, 0, 0, 64, 64, rgb.data(), 64, 64, GDT_Byte, 3, nullptr, 3, 64 * 3, 1, nullptr);
+        if (image->RasterIO(GF_Write, 0, 0, 64, 64, rgb.data(), 64, 64, GDT_Byte, 3, nullptr, 3, 64 * 3, 1, nullptr) != CE_None)
+        {
+            GDALClose(image);
+            return false;
+        }
         std::filesystem::create_directories(file.parent_path());
         GDALDataset* out = png->CreateCopy(file.string().c_str(), image, FALSE, nullptr, nullptr, nullptr);
         const bool ok = out != nullptr;

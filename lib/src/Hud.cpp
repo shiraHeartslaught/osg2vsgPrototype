@@ -190,8 +190,11 @@ namespace ivevsg
                 if (ImGui::Checkbox("hillshade", &o.terrain.hillshade)) needsReload = true;
                 if (layer.nativeLevel >= 0) ImGui::TextDisabled("full resolution at zoom %d, pages to %d (interpolated past %d)", layer.nativeLevel, layer.maxLevel, layer.nativeLevel);
             }
-            if (needsReload) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Changes marked need a reload:");
-            ImGui::SameLine(needsReload ? 0.0f : 0.0f);
+            if (needsReload)
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Changes marked need a reload:");
+                ImGui::SameLine();
+            }
             if (ImGui::SmallButton("Reload layer")) app.reloadLayer(index);
         }
     } // namespace

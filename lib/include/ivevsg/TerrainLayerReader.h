@@ -29,7 +29,7 @@ namespace ivevsg
     {
     public:
         TerrainLayerReader();
-        ~TerrainLayerReader();
+        ~TerrainLayerReader() override;
 
         /// .dt0 / .dt1 / .dt2 / .hgt files and directories of them, by convention; any GDAL raster when
         /// the options say loaderKeys::layerKind = "terrain".
@@ -54,7 +54,4 @@ namespace ivevsg
         mutable std::mutex _mutex;
         mutable std::map<std::string, std::weak_ptr<Layer>> _layers;
     };
-
-    /// Hypsometric tint for a height between the data's minimum and maximum (sea for h <= 0), RGB in [0, 1].
-    vsg::vec3 hypsometricTint(double height, double minHeight, double maxHeight);
 } // namespace ivevsg

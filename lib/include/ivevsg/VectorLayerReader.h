@@ -30,7 +30,7 @@ namespace ivevsg
     {
     public:
         VectorLayerReader();
-        ~VectorLayerReader();
+        ~VectorLayerReader() override;
 
         /// OGR formats by extension (looksLikeVector), or anything when loaderKeys::layerKind = "vector".
         static bool handles(const vsg::Path& filename, vsg::ref_ptr<const vsg::Options> options);

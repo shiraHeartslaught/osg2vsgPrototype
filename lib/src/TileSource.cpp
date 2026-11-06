@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <filesystem>
 #include <mutex>
 
@@ -371,7 +370,7 @@ namespace ivevsg
         if ((rgba->properties.origin & vsg::BOTTOM_LEFT) == vsg::BOTTOM_LEFT && h > 1)
         {
             auto flipped = vsg::ubvec4Array2D::create(w, h, vsg::ubvec4(0, 0, 0, 0));
-            for (uint32_t y = 0; y < h; ++y) std::memcpy(&flipped->at(0, y), &rgba->at(0, h - 1 - y), w * sizeof(vsg::ubvec4));
+            for (uint32_t y = 0; y < h; ++y) std::copy_n(&rgba->at(0, h - 1 - y), w, &flipped->at(0, y));
             rgba = flipped;
         }
         rgba->properties.format = VK_FORMAT_R8G8B8A8_UNORM;

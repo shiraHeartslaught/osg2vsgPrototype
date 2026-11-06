@@ -220,7 +220,7 @@ namespace ivevsg
                     const char* pluginPath = std::getenv("OSG_LIBRARY_PATH");
                     result.error += " (check that OSG's format plugins are found, OSG_LIBRARY_PATH=";
                     result.error += pluginPath ? pluginPath : "<unset>";
-                    result.error += ")";
+                    result.error += ')';
                 }
             }
         }
